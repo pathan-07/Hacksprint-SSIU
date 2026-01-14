@@ -9,6 +9,7 @@ class Intent(str, Enum):
     record_payment = "record_payment"
     undo_last = "undo_last"
     get_summary = "get_summary"
+    get_customer_total = "get_customer_total"
 
 
 class IntentResult(BaseModel):

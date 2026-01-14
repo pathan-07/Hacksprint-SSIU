@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import difflib
 from typing import Any
 
 import httpx
@@ -10,7 +11,18 @@ from .settings import settings
 
 logger = logging.getLogger(__name__)
 
+
+try:
+    # Pure python dependency (recommended for voice-name matching)
+    from metaphone import doublemetaphone  # type: ignore
+except Exception:
+    doublemetaphone = None
+
 _http: httpx.Client | None = None
+
+
+def _is_missing_table_error(e: Exception) -> bool:
+    return isinstance(e, httpx.HTTPStatusError) and getattr(e.response, "status_code", None) == 404
 
 
 def _get_http() -> httpx.Client:
@@ -62,6 +74,40 @@ def _rest_patch(table: str, params: dict[str, str], body: dict[str, Any]) -> Non
 
 def _name_norm(name: str) -> str:
     return " ".join((name or "").strip().lower().split())
+
+
+def _roman_key(name: str) -> str:
+    """Best-effort romanized/normalized form for fuzzy matching."""
+
+    try:
+        from unidecode import unidecode  # type: ignore
+
+        return _name_norm(unidecode(name or ""))
+    except Exception:
+        return _name_norm(name)
+
+
+def _ascii_key(name: str) -> str:
+    """Returns a phonetic code for matching pronunciation.
+
+    Example: 'Raju' and 'Raaju' should land on the same phonetic key.
+    Falls back to a romanized normalized string when phonetic encoding isn't available.
+    """
+
+    norm = _roman_key(name)
+
+    if not norm:
+        return ""
+
+    if doublemetaphone:
+        # Handle multi-word names by encoding each token.
+        codes: list[str] = []
+        for token in norm.split():
+            primary = (doublemetaphone(token)[0] or "").strip()
+            codes.append(primary or token)
+        return " ".join(codes).strip()
+
+    return norm
 
 
 def get_or_create_customer(shop_phone: str, customer_name: str) -> dict[str, Any]:
@@ -253,6 +299,105 @@ def get_summary(shop_phone: str) -> list[dict[str, Any]]:
     return items
 
 
+def get_customer_total(shop_phone: str, customer_name: str) -> dict[str, Any] | None:
+    """Returns net udhaar total for a given customer name.
+
+    - Net includes payments (stored as negative amounts)
+    - Ignores reversed entries
+    - Aggregates across ALL matching customers (in case multiple rows exist for the same name)
+    """
+
+    name = (customer_name or "").strip()
+    if not name:
+        return None
+
+    norm = _name_norm(name)
+
+    # Fetch customers for this shop and fuzzy-match.
+    # WHY: Users may say the same name in Hindi/English (e.g., "राजू" vs "Raju") or with minor spelling differences.
+    all_customers = _rest_get(
+        "customers",
+        {
+            "select": "id,name,name_norm",
+            "shop_phone": f"eq.{shop_phone}",
+            "order": "created_at.desc",
+            "limit": "500",
+        },
+    )
+
+    q_norm = norm
+    q_roman = _roman_key(name)
+    q_key = _ascii_key(name)
+
+    matched: list[dict[str, Any]] = []
+    for c in all_customers or []:
+        cand_norm = str(c.get("name_norm") or "")
+        cand_name = str(c.get("name") or "")
+        cand_roman = _roman_key(cand_name)
+        cand_key = _ascii_key(cand_name)
+
+        # Strong matches
+        if cand_norm == q_norm or (cand_key and q_key and cand_key == q_key):
+            matched.append(c)
+            continue
+
+        # Fuzzy matches (avoid very short strings)
+        if len(q_roman) >= 3 and len(cand_roman) >= 3:
+            ratio = difflib.SequenceMatcher(None, q_roman, cand_roman).ratio()
+            if ratio >= 0.74:
+                matched.append(c)
+
+    # De-dup by id
+    seen: set[int] = set()
+    customers: list[dict[str, Any]] = []
+    for c in matched:
+        cid = int(c["id"])
+        if cid in seen:
+            continue
+        seen.add(cid)
+        customers.append({"id": cid, "name": c.get("name")})
+
+    if not customers:
+        # Suggestions by partial match for UX
+        suggestions = [str(c.get("name")) for c in (all_customers or []) if q_norm and q_norm in str(c.get("name_norm") or "")][:5]
+        return {"status": "not_found", "suggestions": suggestions}
+
+    customer_ids = sorted({int(c["id"]) for c in customers})
+    in_list = ",".join(str(i) for i in customer_ids)
+
+    rows = _rest_get(
+        "udhaar_entries",
+        {
+            "select": "amount,reversed,customer_id",
+            "shop_phone": f"eq.{shop_phone}",
+            "customer_id": f"in.({in_list})",
+            "order": "created_at.desc",
+            "limit": "1000",
+        },
+    )
+
+    total = 0.0
+    by_customer: dict[int, float] = {int(c["id"]): 0.0 for c in customers}
+    for r in rows or []:
+        if r.get("reversed"):
+            continue
+        amt = float(r["amount"])
+        total += amt
+        cid = int(r["customer_id"])
+        by_customer[cid] = by_customer.get(cid, 0.0) + amt
+
+    breakdown = []
+    for c in customers:
+        cid = int(c["id"])
+        breakdown.append({"id": cid, "name": c.get("name"), "total": by_customer.get(cid, 0.0)})
+    breakdown.sort(key=lambda x: abs(float(x.get("total") or 0.0)), reverse=True)
+
+    payload: dict[str, Any] = {"status": "ok", "customers": customers, "breakdown": breakdown, "total": total}
+    if len(customers) == 1:
+        payload["customer"] = customers[0]
+    return payload
+
+
 def get_recent_entries(shop_phone: str, limit: int = 20) -> list[dict[str, Any]]:
     """Returns recent entries with customer names.
 
@@ -299,3 +444,204 @@ def get_recent_entries(shop_phone: str, limit: int = 20) -> list[dict[str, Any]]
             }
         )
     return out
+
+
+def create_payment_hold(
+    *,
+    shop_phone: str,
+    customer_id: int,
+    amount: float,
+    due_at: str | None = None,
+    hold_reason: str | None = None,
+) -> dict[str, Any]:
+    try:
+        rows = _rest_insert(
+            "payment_holds",
+            {
+                "shop_phone": shop_phone,
+                "customer_id": int(customer_id),
+                "amount": float(amount),
+                "status": "open",
+                "due_at": due_at,
+                "hold_reason": hold_reason,
+            },
+        )
+        return rows[0]
+    except Exception as e:
+        if _is_missing_table_error(e):
+            raise RuntimeError("Supabase schema missing: run supabase/schema.sql (payment_holds)")
+        raise
+
+
+def list_payment_holds(shop_phone: str, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit), 200))
+    params: dict[str, str] = {
+        "select": "id,customer_id,amount,status,hold_reason,due_at,created_at,last_notified_at,notify_count,resolved_at",
+        "shop_phone": f"eq.{shop_phone}",
+        "order": "created_at.desc",
+        "limit": str(limit),
+    }
+    if status:
+        params["status"] = f"eq.{status}"
+    try:
+        rows = _rest_get("payment_holds", params)
+        return _attach_customer_names(shop_phone, rows)
+    except Exception as e:
+        if _is_missing_table_error(e):
+            return []
+        raise
+
+
+def list_due_payment_holds(
+    shop_phone: str,
+    *,
+    cutoff_days: int = 7,
+    notify_cooldown_hours: int = 24,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Return open holds that are due/old enough AND not recently notified."""
+
+    limit = max(1, min(int(limit), 500))
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = (now - dt.timedelta(days=int(cutoff_days))).isoformat()
+    cooldown = (now - dt.timedelta(hours=int(notify_cooldown_hours))).isoformat()
+
+    params: dict[str, str] = {
+        "select": "id,customer_id,amount,status,hold_reason,due_at,created_at,last_notified_at,notify_count",
+        "shop_phone": f"eq.{shop_phone}",
+        "status": "eq.open",
+        "order": "created_at.asc",
+        "limit": str(limit),
+        # due_at <= cutoff OR (due_at IS NULL AND created_at <= cutoff)
+        "or": f"(due_at.lte.{cutoff},and(due_at.is.null,created_at.lte.{cutoff}))",
+        # last_notified_at IS NULL OR last_notified_at <= cooldown
+        "and": f"(or(last_notified_at.is.null,last_notified_at.lte.{cooldown}))",
+    }
+
+    try:
+        rows = _rest_get("payment_holds", params)
+        return _attach_customer_names(shop_phone, rows)
+    except Exception as e:
+        if _is_missing_table_error(e):
+            return []
+        raise
+
+
+def mark_payment_hold_notified(hold_id: int) -> None:
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    # Note: PostgREST doesn't support atomic increment without RPC; good enough for hackathon.
+    try:
+        current = _rest_get(
+            "payment_holds",
+            {"select": "id,notify_count", "id": f"eq.{int(hold_id)}", "limit": "1"},
+        )
+    except Exception as e:
+        if _is_missing_table_error(e):
+            return
+        raise
+    notify_count = int((current[0] or {}).get("notify_count") or 0) + 1 if current else 1
+    _rest_patch(
+        "payment_holds",
+        {"id": f"eq.{int(hold_id)}"},
+        {"last_notified_at": now, "notify_count": notify_count},
+    )
+
+
+def resolve_payment_hold(hold_id: int, *, note: str | None = None) -> None:
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    try:
+        _rest_patch(
+            "payment_holds",
+            {"id": f"eq.{int(hold_id)}"},
+            {"status": "resolved", "resolved_at": now, "resolved_note": note},
+        )
+    except Exception as e:
+        if _is_missing_table_error(e):
+            return
+        raise
+
+
+def insert_notification_log(
+    *,
+    shop_phone: str,
+    channel: str,
+    notification_type: str,
+    entity_table: str,
+    entity_id: int,
+    message: str,
+    status: str = "sent",
+    provider_message_id: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    try:
+        rows = _rest_insert(
+            "notification_log",
+            {
+                "shop_phone": shop_phone,
+                "channel": channel,
+                "notification_type": notification_type,
+                "entity_table": entity_table,
+                "entity_id": int(entity_id),
+                "message": message,
+                "status": status,
+                "provider_message_id": provider_message_id,
+                "error": error,
+            },
+        )
+        return rows[0]
+    except Exception as e:
+        if _is_missing_table_error(e):
+            # In demo mode we still want the app to run even if schema isn't updated yet.
+            logger.warning("Supabase schema missing: notification_log")
+            return {
+                "shop_phone": shop_phone,
+                "channel": channel,
+                "notification_type": notification_type,
+                "entity_table": entity_table,
+                "entity_id": int(entity_id),
+                "message": message,
+                "status": "failed",
+                "error": "missing_table:notification_log",
+            }
+        raise
+
+
+def list_notifications(shop_phone: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit), 200))
+    try:
+        return _rest_get(
+            "notification_log",
+            {
+                "select": "id,channel,notification_type,entity_table,entity_id,message,status,created_at,error",
+                "shop_phone": f"eq.{shop_phone}",
+                "order": "created_at.desc",
+                "limit": str(limit),
+            },
+        )
+    except Exception as e:
+        if _is_missing_table_error(e):
+            return []
+        raise
+
+
+def _attach_customer_names(shop_phone: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    cust_ids = sorted({int(r["customer_id"]) for r in rows if r.get("customer_id") is not None})
+    if not cust_ids:
+        return rows
+    in_list = ",".join(str(i) for i in cust_ids)
+    customers = _rest_get(
+        "customers",
+        {
+            "select": "id,name",
+            "shop_phone": f"eq.{shop_phone}",
+            "id": f"in.({in_list})",
+        },
+    )
+    id_to_name = {int(c["id"]): c.get("name") for c in (customers or [])}
+    for r in rows:
+        cid = int(r.get("customer_id") or 0)
+        if cid:
+            r["customer_name"] = id_to_name.get(cid)
+    return rows

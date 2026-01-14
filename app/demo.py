@@ -8,13 +8,21 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from .db import (
+    create_payment_hold,
     create_pending_action,
     expire_pending_actions,
     get_or_create_customer,
     get_pending_action,
     get_recent_entries,
+    get_customer_total,
     get_summary,
     insert_udhaar_entry,
+    list_due_payment_holds,
+    list_notifications,
+    list_payment_holds,
+    mark_payment_hold_notified,
+    insert_notification_log,
+    resolve_payment_hold,
     set_pending_action_status,
     undo_last_entry,
 )
@@ -25,6 +33,18 @@ from .types import Intent
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/demo", tags=["demo"])
+
+
+class CreateHoldRequest(BaseModel):
+    shop_phone: str = Field(default="+919999999999")
+    customer_name: str
+    amount: float
+    hold_reason: str | None = None
+    due_in_days: int | None = None
+
+
+class ResolveHoldRequest(BaseModel):
+    note: str | None = None
 
 
 @router.get("/record", response_class=HTMLResponse)
@@ -333,6 +353,94 @@ def demo_record_page() -> HTMLResponse:
     )
 
 
+@router.post("/holds")
+def demo_create_hold(req: CreateHoldRequest) -> dict:
+    """Create a payment hold (promise) that can be reminded later."""
+
+    if not req.customer_name.strip():
+        raise HTTPException(status_code=400, detail="customer_name required")
+    if float(req.amount) <= 0:
+        raise HTTPException(status_code=400, detail="amount must be > 0")
+
+    cust = get_or_create_customer(req.shop_phone, req.customer_name)
+    due_at: str | None = None
+    if req.due_in_days is not None:
+        due = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=int(req.due_in_days))
+        due_at = due.isoformat()
+
+    hold = create_payment_hold(
+        shop_phone=req.shop_phone,
+        customer_id=int(cust["id"]),
+        amount=float(req.amount),
+        due_at=due_at,
+        hold_reason=req.hold_reason,
+    )
+    return {"ok": True, "hold": hold}
+
+
+@router.get("/holds")
+def demo_list_holds(shop_phone: str = "+919999999999", status: str | None = None, limit: int = 50) -> dict:
+    holds = list_payment_holds(shop_phone, status=status, limit=limit)
+    return {"ok": True, "holds": holds}
+
+
+@router.post("/holds/{hold_id}/resolve")
+def demo_resolve_hold(hold_id: int, req: ResolveHoldRequest) -> dict:
+    resolve_payment_hold(int(hold_id), note=req.note)
+    return {"ok": True}
+
+
+@router.get("/notifications")
+def demo_list_notifications(shop_phone: str = "+919999999999", limit: int = 50) -> dict:
+    items = list_notifications(shop_phone, limit=limit)
+    return {"ok": True, "notifications": items}
+
+
+@router.post("/run-hold-agent")
+async def demo_run_hold_agent(shop_phone: str = "+919999999999", cutoff_days: int = 7) -> dict:
+    """Run the reminder agent once (demo helper)."""
+
+    holds = list_due_payment_holds(shop_phone, cutoff_days=cutoff_days)
+    sent = 0
+
+    for h in holds:
+        hold_id = int(h["id"])
+        customer = h.get("customer_name") or f"Customer {h.get('customer_id')}"
+        amt = float(h.get("amount") or 0)
+        text = f"Payment follow-up reminder: {customer} has ₹{amt:.0f} pending for {cutoff_days}+ days."
+
+        channel = "demo"
+        status = "sent"
+        err: str | None = None
+
+        if settings.enable_whatsapp and settings.whatsapp_token and settings.whatsapp_phone_number_id:
+            channel = "whatsapp"
+            try:
+                from .whatsapp import send_text
+
+                await send_text(shop_phone, text)
+            except Exception as e:
+                status = "failed"
+                err = str(e)
+
+        insert_notification_log(
+            shop_phone=shop_phone,
+            channel=channel,
+            notification_type=f"payment_hold_{cutoff_days}d",
+            entity_table="payment_holds",
+            entity_id=hold_id,
+            message=text,
+            status=status,
+            error=err,
+        )
+
+        if status == "sent":
+            mark_payment_hold_notified(hold_id)
+            sent += 1
+
+    return {"ok": True, "due": len(holds), "sent": sent}
+
+
 @router.get("/entries")
 def demo_entries(shop_phone: str, limit: int = 25) -> dict:
     if not shop_phone.strip():
@@ -363,6 +471,12 @@ def _is_no(text: str) -> bool:
 
 def _money(amount: float) -> str:
     return f"₹{amount:.0f}" if float(amount).is_integer() else f"₹{amount:.2f}"
+
+
+def _net_label(total: float) -> str:
+    if total < 0:
+        return f"Advance {_money(abs(total))}"
+    return f"Net {_money(total)}"
 
 
 def _commit_pending(pending: dict, *, decision: str) -> dict:
@@ -460,6 +574,40 @@ def demo_text(body: DemoTextIn) -> dict:
     if result.intent == Intent.get_summary:
         items = get_summary(body.shop_phone)
         return {"status": "ok", "intent": result.model_dump(), "summary": items}
+
+    if result.intent == Intent.get_customer_total:
+        if not result.customer_name.strip():
+            return {
+                "status": "clarification_needed",
+                "intent": result.model_dump(),
+                "message": "Kis customer ka total? Example: 'Raju ka total udhaar kitna hai?'",
+            }
+        info = get_customer_total(body.shop_phone, result.customer_name.strip())
+        if not info or info.get("status") != "ok":
+            sug = (info or {}).get("suggestions") or []
+            msg = "Customer not found."
+            if sug:
+                msg += " Did you mean: " + ", ".join(sug)
+            return {"status": "not_found", "intent": result.model_dump(), "message": msg}
+
+        total = float(info["total"])
+        customers = info.get("customers") or []
+        if info.get("customer"):
+            label = str(info["customer"]["name"])
+        else:
+            label = result.customer_name.strip()
+        msg = f"{label} total: {_net_label(total)}"
+        if len(customers) > 1:
+            msg += f" (matched {len(customers)} customers)"
+        return {
+            "status": "ok",
+            "intent": result.model_dump(),
+            "customer": info.get("customer"),
+            "customers": customers,
+            "breakdown": info.get("breakdown") or [],
+            "total": total,
+            "message": msg,
+        }
 
     if result.intent == Intent.undo_last:
         pending = create_pending_action(
@@ -563,6 +711,42 @@ async def demo_voice(shop_phone: str, file: UploadFile = File(...)) -> dict:
     if result.intent == Intent.get_summary:
         items = get_summary(shop_phone)
         return {"status": "ok", "transcript": transcript, "intent": result.model_dump(), "summary": items}
+
+    if result.intent == Intent.get_customer_total:
+        if not result.customer_name.strip():
+            return {
+                "status": "clarification_needed",
+                "transcript": transcript,
+                "intent": result.model_dump(),
+                "message": "Kis customer ka total? Example: 'Raju ka total udhaar kitna hai?'",
+            }
+        info = get_customer_total(shop_phone, result.customer_name.strip())
+        if not info or info.get("status") != "ok":
+            sug = (info or {}).get("suggestions") or []
+            msg = "Customer not found."
+            if sug:
+                msg += " Did you mean: " + ", ".join(sug)
+            return {"status": "not_found", "transcript": transcript, "intent": result.model_dump(), "message": msg}
+
+        total = float(info["total"])
+        customers = info.get("customers") or []
+        if info.get("customer"):
+            label = str(info["customer"]["name"])
+        else:
+            label = result.customer_name.strip()
+        msg = f"{label} total: {_net_label(total)}"
+        if len(customers) > 1:
+            msg += f" (matched {len(customers)} customers)"
+        return {
+            "status": "ok",
+            "transcript": transcript,
+            "intent": result.model_dump(),
+            "customer": info.get("customer"),
+            "customers": customers,
+            "breakdown": info.get("breakdown") or [],
+            "total": total,
+            "message": msg,
+        }
 
     if result.intent == Intent.undo_last:
         pending = create_pending_action(

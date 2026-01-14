@@ -16,6 +16,7 @@ from .db import (
     insert_udhaar_entry,
     set_pending_action_status,
     undo_last_entry,
+    get_customer_total,
 )
 from .demo import router as demo_router
 from .gemini_ai import extract_intent, transcribe_audio
@@ -77,6 +78,10 @@ def _money(amount: float) -> str:
     # Simple INR formatting for WhatsApp.
     return f"₹{amount:.0f}" if float(amount).is_integer() else f"₹{amount:.2f}"
 
+def _net_label(total: float) -> str:
+    if total < 0:
+        return f"Advance {_money(abs(total))}"
+    return f"Net {_money(total)}"
 
 async def _handle_confirmation(shop_phone: str, text: str) -> bool:
     expire_pending_actions(shop_phone)
@@ -194,6 +199,30 @@ async def _process_intent(
             shop_phone,
             f"Confirm: Add {_money(float(result.amount))} udhaar for {result.customer_name.strip()}? Reply YES or NO.",
         )
+        return
+
+    if result.intent == Intent.get_customer_total:
+        if not result.customer_name.strip():
+            await send_text(shop_phone, "Which customer? Example: 'Raju ka total udhaar kitna hai?'")
+            return
+        info = get_customer_total(shop_phone, result.customer_name.strip())
+        if not info or info.get("status") != "ok":
+            sug = (info or {}).get("suggestions") or []
+            msg = "Customer not found."
+            if sug:
+                msg += " Did you mean: " + ", ".join(sug)
+            await send_text(shop_phone, msg)
+            return
+
+        total = float(info["total"])
+        label = result.customer_name.strip()
+        if info.get("customer"):
+            label = str(info["customer"]["name"])
+        customers = info.get("customers") or []
+        msg = f"{label} total: {_net_label(total)}"
+        if len(customers) > 1:
+            msg += f" (matched {len(customers)} customers)"
+        await send_text(shop_phone, msg)
         return
 
     await send_text(shop_phone, "Sorry, I couldn't map that to an action.")
