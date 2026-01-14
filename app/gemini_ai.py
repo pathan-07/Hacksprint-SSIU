@@ -65,14 +65,15 @@ def _intent_prompt(transcript: str) -> str:
     return (
         "You are an assistant for an Indian kirana shop's udhaar (credit) notebook. "
         "Given the user's message (Hindi/Hinglish possible), extract intent in STRICT JSON only. "
-        "Valid intents: add_udhaar, undo_last, get_summary. "
+        "Valid intents: add_udhaar, record_payment, undo_last, get_summary. "
         "Rules: "
         "- For add_udhaar: detect customer_name and amount (number). "
+        "- For record_payment: detect customer_name and amount (number). Amount should be a positive number in JSON (we will reduce udhaar internally). "
         "- For undo_last: customer_name can be empty. amount must be null. "
         "- For get_summary: customer_name can be empty. amount must be null. "
         "- confidence is 0 to 1 (float). "
         "Return exactly this JSON shape and nothing else: "
-        "{\"intent\":\"add_udhaar | undo_last | get_summary\",\"customer_name\":\"string\",\"amount\":number|null,\"confidence\":0-1}"
+        "{\"intent\":\"add_udhaar | record_payment | undo_last | get_summary\",\"customer_name\":\"string\",\"amount\":number|null,\"confidence\":0-1}"
         "\n\nMessage:\n" + transcript
     )
 

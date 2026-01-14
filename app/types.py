@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 class Intent(str, Enum):
     add_udhaar = "add_udhaar"
+    record_payment = "record_payment"
     undo_last = "undo_last"
     get_summary = "get_summary"
 

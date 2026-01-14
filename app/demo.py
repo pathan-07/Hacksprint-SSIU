@@ -398,6 +398,25 @@ def _commit_pending(pending: dict, *, decision: str) -> dict:
                 "entry": entry,
             }
 
+        if action_type == Intent.record_payment.value:
+            customer = get_or_create_customer(shop_phone, payload.get("customer_name", ""))
+            amt = float(payload["amount"])
+            # Store payments as negative amounts so summary is net.
+            entry = insert_udhaar_entry(
+                shop_phone=shop_phone,
+                customer_id=int(customer["id"]),
+                amount=-abs(amt),
+                transcript=payload.get("transcript"),
+                raw_text=payload.get("raw_text"),
+                source_message_id=payload.get("source_message_id"),
+            )
+            set_pending_action_status(int(pending["id"]), "confirmed")
+            return {
+                "status": "confirmed",
+                "message": f"Done. Recorded payment {_money(abs(float(entry['amount'])))} from {customer['name']}",
+                "entry": entry,
+            }
+
         if action_type == Intent.undo_last.value:
             entry = undo_last_entry(shop_phone)
             set_pending_action_status(int(pending["id"]), "confirmed")
@@ -455,6 +474,32 @@ def demo_text(body: DemoTextIn) -> dict:
             "message": "Confirm undo last entry? Reply YES or NO.",
         }
 
+    if result.intent == Intent.record_payment:
+        if not result.customer_name.strip() or result.amount is None:
+            return {
+                "status": "clarification_needed",
+                "intent": result.model_dump(),
+                "message": "Customer ka naam aur payment amount clear bolo (e.g., 'Raju ne 100 de diye').",
+            }
+
+        pending = create_pending_action(
+            body.shop_phone,
+            Intent.record_payment.value,
+            {
+                "customer_name": result.customer_name.strip(),
+                "amount": float(result.amount),
+                "transcript": None,
+                "raw_text": text,
+                "source_message_id": None,
+            },
+        )
+        return {
+            "status": "pending_confirmation",
+            "pending_id": pending["id"],
+            "intent": result.model_dump(),
+            "message": f"Confirm: Record payment {_money(float(result.amount))} from {result.customer_name.strip()}? Reply YES or NO.",
+        }
+
     if result.intent == Intent.add_udhaar:
         if not result.customer_name.strip() or result.amount is None:
             return {
@@ -493,7 +538,14 @@ async def demo_voice(shop_phone: str, file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="Empty audio")
 
     mime_type = file.content_type or "audio/ogg"
-    transcript = await transcribe_audio(audio_bytes, mime_type)
+    try:
+        transcript = await transcribe_audio(audio_bytes, mime_type)
+    except Exception:
+        logger.exception("Transcription failed")
+        return {
+            "status": "error",
+            "message": "Transcription failed (Gemini). Check your GEMINI_API_KEY and quota, then try again.",
+        }
     if not transcript:
         return {"status": "clarification_needed", "message": "Voice clear nahi thi. Please resend."}
 
@@ -524,6 +576,34 @@ async def demo_voice(shop_phone: str, file: UploadFile = File(...)) -> dict:
             "transcript": transcript,
             "intent": result.model_dump(),
             "message": "Confirm undo last entry? Reply YES or NO.",
+        }
+
+    if result.intent == Intent.record_payment:
+        if not result.customer_name.strip() or result.amount is None:
+            return {
+                "status": "clarification_needed",
+                "transcript": transcript,
+                "intent": result.model_dump(),
+                "message": "Customer ka naam aur payment amount clear bolo (e.g., 'Raju ne 100 de diye').",
+            }
+
+        pending = create_pending_action(
+            shop_phone,
+            Intent.record_payment.value,
+            {
+                "customer_name": result.customer_name.strip(),
+                "amount": float(result.amount),
+                "transcript": transcript,
+                "raw_text": transcript,
+                "source_message_id": None,
+            },
+        )
+        return {
+            "status": "pending_confirmation",
+            "pending_id": pending["id"],
+            "transcript": transcript,
+            "intent": result.model_dump(),
+            "message": f"Confirm: Record payment {_money(float(result.amount))} from {result.customer_name.strip()}? Reply YES or NO.",
         }
 
     if result.intent == Intent.add_udhaar:
