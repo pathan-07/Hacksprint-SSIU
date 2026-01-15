@@ -14,7 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 def _graph_base_url() -> str:
+    # Base Graph API URL (no trailing slash).
     return f"https://graph.facebook.com/{settings.meta_graph_version}"
+
+
+def _messages_url() -> str:
+    if not settings.whatsapp_phone_number_id:
+        raise RuntimeError("Missing WHATSAPP_PHONE_NUMBER_ID")
+    return f"{_graph_base_url()}/{settings.whatsapp_phone_number_id}/messages"
 
 
 def verify_webhook(mode: str | None, token: str | None, challenge: str | None) -> str | None:
@@ -77,7 +84,7 @@ async def download_media(download_url: str) -> bytes:
 
 
 async def send_text(to_phone: str, text: str) -> None:
-    url = f"{_graph_base_url()}/{settings.whatsapp_phone_number_id}/messages"
+    url = _messages_url()
     headers = {
         "Authorization": f"Bearer {settings.whatsapp_token}",
         "Content-Type": "application/json",
