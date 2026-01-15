@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 
 from .db import (
     create_pending_action,
@@ -37,6 +37,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="VoiceKhata")
 app.include_router(demo_router)
+
+
+@app.get("/")
+async def root() -> RedirectResponse:
+    # Friendly default when opened in a browser.
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    # Avoid noisy 404s from browsers.
+    return Response(status_code=204)
 
 
 @app.on_event("startup")
