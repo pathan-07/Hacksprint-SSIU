@@ -36,6 +36,11 @@ def verify_signature(raw_body: bytes, signature_header: str | None) -> bool:
     WHY: WhatsApp will POST to your webhook; validating prevents spoofed requests.
     """
 
+    # In local/dev environments, signature validation often blocks progress
+    # (misconfigured app secret, proxies, etc). Keep it strict in prod.
+    if (settings.app_env or "").lower() not in {"prod", "production"}:
+        return True
+
     if not settings.whatsapp_app_secret:
         return True
 
