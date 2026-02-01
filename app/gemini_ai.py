@@ -79,19 +79,21 @@ async def transcribe_audio(audio_bytes: bytes, mime_type: str | None) -> str:
 
 def _intent_prompt(transcript: str) -> str:
     return (
-        "You are an assistant for an Indian kirana shop's udhaar (credit) notebook. "
-        "Given the user's message (Hindi/Hinglish possible), extract intent in STRICT JSON only. "
+        "You are a smart assistant for an Indian kirana shop. "
+        "Your job is to specificially extract transaction details from the user's message (which may be Hindi/English/Hinglish text, or a description of an image/receipt). "
         "Valid intents: add_udhaar, record_payment, undo_last, get_summary, get_customer_total. "
-        "Rules: "
-        "- For add_udhaar: detect customer_name and amount (number). "
-        "- For record_payment: detect customer_name and amount (number). Amount should be a positive number in JSON (we will reduce udhaar internally). "
-        "- For undo_last: customer_name can be empty. amount must be null. "
-        "- For get_summary: customer_name can be empty. amount must be null. "
-        "- For get_customer_total: customer_name is required. amount must be null. Use this when user asks 'Raju ka total udhaar kitna hai?' or 'How much does Raju owe?'. "
-        "- confidence is 0 to 1 (float). "
-        "Return exactly this JSON shape and nothing else: "
-        "{\"intent\":\"add_udhaar | record_payment | undo_last | get_summary | get_customer_total\",\"customer_name\":\"string\",\"amount\":number|null,\"confidence\":0-1}"
-        "\n\nMessage:\n" + transcript
+        "\n\nRules: "
+        "1. **add_udhaar**: User wants to add credit (udhaar). Extract 'customer_name' and 'amount'. "
+        "2. **record_payment**: User receives money (payment). Extract 'customer_name' and 'amount'. "
+        "3. **undo_last**: User wants to undo/delete the last entry. "
+        "4. **get_summary**: User wants a list of who owes what. "
+        "5. **get_customer_total**: User asks for a specific person's total. "
+        "\n\nOutput Format MUST be a single JSON object: "
+        "{\"intent\": \"...\", \"customer_name\": \"...\", \"amount\": 123.0, \"confidence\": 0.9}"
+        "\n\n- If amount is not mentioned, use null. "
+        "\n- If multiple people are mentioned, pick the clearest one. "
+        "\n- Convert all numbers to float. "
+        "\n\nInput Context:\n" + transcript
     )
 
 
@@ -129,6 +131,16 @@ def extract_intent(transcript: str) -> IntentResult:
 
     client = _get_client()
 
+    def _extract_numbers(text: str) -> list[float]:
+        # Extract numeric values from text (e.g., "10", "10.5", "₹10").
+        nums: list[float] = []
+        for m in re.finditer(r"\d+(?:\.\d+)?", text or ""):
+            try:
+                nums.append(float(m.group(0)))
+            except Exception:
+                continue
+        return nums
+
     try:
         resp = client.models.generate_content(
             model=settings.gemini_intent_model,
@@ -148,8 +160,66 @@ def extract_intent(transcript: str) -> IntentResult:
             raw = raw[start : end + 1]
 
         data: dict[str, Any] = json.loads(raw)
-        return IntentResult.model_validate(data)
+        result = IntentResult.model_validate(data)
+
+        # If digits are present in the user's text, prefer those over hallucinated numbers.
+        nums = _extract_numbers(transcript)
+        if nums:
+            # If model returned an amount not present in the text, override with first number.
+            if result.amount is None or all(abs(float(result.amount) - n) > 0.001 for n in nums):
+                result.amount = float(nums[0])
+
+        return result
     except Exception:
         logger.exception("Gemini intent extraction failed")
         # Fail safe: ask for clarification
+        return IntentResult(intent="get_summary", customer_name="", amount=None, confidence=0.0)
+
+
+async def analyze_image(image_bytes: bytes, mime_type: str) -> IntentResult:
+    """Analyze WhatsApp image (e.g. receipt/handwritten note) using Gemini.
+
+    WHY: Allows extracting transaction details from photos.
+    """
+    if not image_bytes:
+        return IntentResult(intent="get_summary", customer_name="", amount=None, confidence=0.0)
+
+    # Re-use the same intent prompt logic but adapted for image context if needed.
+    # For now, we ask the model to look at the image and extract the same JSON.
+    prompt = (
+        "Analyze this image (receipt, handwritten note, or shop counter photo). "
+        "Extract the transaction detail in STRICT JSON."
+        "\n\n" + _intent_prompt("IMAGE CONTENT")
+    )
+
+    client = _get_client()
+    try:
+        resp = client.models.generate_content(
+            model=settings.gemini_intent_model,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
+        raw = (resp.text or "").strip()
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            raw = raw[start : end + 1]
+
+        data: dict[str, Any] = json.loads(raw)
+        return IntentResult.model_validate(data)
+
+    except Exception:
+        logger.exception("Gemini image analysis failed")
         return IntentResult(intent="get_summary", customer_name="", amount=None, confidence=0.0)

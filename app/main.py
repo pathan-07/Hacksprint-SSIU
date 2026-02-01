@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+import datetime as dt
 import json
 import logging
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 
 from .db import (
     create_pending_action,
     expire_pending_actions,
     get_latest_pending_action,
+    get_recent_entries,
     get_or_create_customer,
     get_summary,
     insert_udhaar_entry,
@@ -19,10 +23,10 @@ from .db import (
     get_customer_total,
 )
 from .demo import router as demo_router
-from .gemini_ai import extract_intent, transcribe_audio
+from .gemini_ai import analyze_image, extract_intent, transcribe_audio
 from .logging_config import setup_logging
 from .settings import require_secrets, settings
-from .types import Intent
+from .types import Intent, IntentResult
 from .whatsapp import (
     download_media,
     extract_messages,
@@ -36,6 +40,65 @@ setup_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="VoiceKhata")
+
+
+def _shop_phone_key(shop_phone: str) -> str:
+    # Keep consistent with DB normalization: "+<digits>".
+    digits = "".join(ch for ch in (shop_phone or "") if ch.isdigit())
+    return f"+{digits}" if digits else (shop_phone or "")
+
+
+class _LiveHub:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._subs: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+
+    async def subscribe(self, key: str) -> asyncio.Queue[dict[str, Any]]:
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=200)
+        async with self._lock:
+            self._subs.setdefault(key, set()).add(q)
+        return q
+
+    async def unsubscribe(self, key: str, q: asyncio.Queue[dict[str, Any]]) -> None:
+        async with self._lock:
+            bucket = self._subs.get(key)
+            if not bucket:
+                return
+            bucket.discard(q)
+            if not bucket:
+                self._subs.pop(key, None)
+
+    async def publish(self, shop_phone: str, kind: str, data: dict[str, Any] | None = None) -> None:
+        key = _shop_phone_key(shop_phone)
+        event: dict[str, Any] = {
+            "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "shop_phone": key,
+            "kind": kind,
+            "data": data or {},
+        }
+        async with self._lock:
+            targets = list(self._subs.get(key, set())) + list(self._subs.get("*", set()))
+
+        for q in targets:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                # Best-effort; drop if consumer is too slow.
+                pass
+
+
+_live = _LiveHub()
+
+# Allow the hackathon landing-page (live-server) to call demo endpoints.
+# This is restricted to localhost origins (any port) to keep it safe.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(demo_router)
 
 
@@ -60,6 +123,180 @@ async def _startup() -> None:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/debug/shop")
+async def debug_shop(shop_phone: str) -> dict[str, Any]:
+    """Dev-only helper to confirm whether WhatsApp is hitting the DB layer.
+
+    Returns latest pending action + recent entries for a given shop phone.
+    """
+
+    if (settings.app_env or "").lower() in {"prod", "production"}:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    expire_pending_actions(shop_phone)
+    pending = get_latest_pending_action(shop_phone)
+    entries = get_recent_entries(shop_phone, limit=10)
+    return {
+        "shop_phone": shop_phone,
+        "pending": pending,
+        "entries": entries,
+    }
+
+
+@app.get("/debug/live", response_class=HTMLResponse)
+async def debug_live_page() -> HTMLResponse:
+        if (settings.app_env or "").lower() in {"prod", "production"}:
+                raise HTTPException(status_code=404, detail="Not found")
+
+        html = """<!doctype html>
+<html lang=\"en\">
+    <head>
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+        <title>VoiceKhata Live Monitor</title>
+        <style>
+            body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 20px; }
+            .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+            input { padding: 10px 12px; border-radius: 10px; border: 1px solid #ddd; min-width: 320px; }
+            button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; cursor: pointer; }
+            pre { background:#0b1020; color:#e7e9ee; padding:12px; border-radius:12px; max-height: 260px; overflow:auto; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border-bottom: 1px solid #eee; padding: 8px 10px; text-align: left; font-size: 14px; }
+            th { background: #fafafa; position: sticky; top: 0; }
+            .hint { color: #555; }
+        </style>
+    </head>
+    <body>
+        <h2>VoiceKhata: Live Monitor</h2>
+        <div class=\"hint\">Shows webhook events + latest entries. Use your phone in digits (e.g., 9199...) or +91... (both work).</div>
+
+        <div class=\"row\" style=\"margin: 12px 0;\">
+            <label>Shop phone:</label>
+            <input id=\"shopPhone\" value=\"919999999999\" />
+            <button id=\"btnStart\" type=\"button\">Start</button>
+            <button id=\"btnStop\" type=\"button\" disabled>Stop</button>
+        </div>
+
+        <h3>Live events</h3>
+        <pre id=\"events\">(not started)</pre>
+
+        <h3>Latest entries (auto refresh)</h3>
+        <div class=\"hint\">Refreshes every 2 seconds from /debug/shop.</div>
+        <div style=\"height: 8px\"></div>
+        <div style=\"max-height: 320px; overflow:auto; border: 1px solid #eee; border-radius: 12px;\">
+            <table>
+                <thead>
+                    <tr><th>ID</th><th>Customer</th><th>Amount</th><th>Reversed</th><th>When</th></tr>
+                </thead>
+                <tbody id=\"rows\"></tbody>
+            </table>
+        </div>
+
+        <script>
+            const eventsEl = document.getElementById('events');
+            const rowsEl = document.getElementById('rows');
+            const shopPhoneEl = document.getElementById('shopPhone');
+            const btnStart = document.getElementById('btnStart');
+            const btnStop = document.getElementById('btnStop');
+            let es = null;
+            let timer = null;
+
+            function appendEvent(obj) {
+                const s = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+                eventsEl.textContent = s + "\\n\\n" + eventsEl.textContent;
+            }
+
+            async function refreshLedger() {
+                const sp = shopPhoneEl.value.trim();
+                if (!sp) return;
+                const resp = await fetch(`/debug/shop?shop_phone=${encodeURIComponent(sp)}`);
+                const data = await resp.json();
+                const entries = data.entries || [];
+                rowsEl.innerHTML = '';
+                if (!entries.length) {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td colspan=\"5\" class=\"hint\">No entries yet.</td>`;
+                    rowsEl.appendChild(tr);
+                    return;
+                }
+                for (const r of entries) {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td>${r.id}</td><td>${r.customer_name || ''}</td><td>${r.amount}</td><td>${r.reversed ? 'yes' : 'no'}</td><td>${r.created_at}</td>`;
+                    rowsEl.appendChild(tr);
+                }
+            }
+
+            function start() {
+                const sp = shopPhoneEl.value.trim();
+                if (!sp) return;
+                appendEvent({status:'starting', shop_phone: sp});
+
+                if (es) es.close();
+                es = new EventSource(`/debug/stream?shop_phone=${encodeURIComponent(sp)}`);
+                es.onmessage = (e) => {
+                    try { appendEvent(JSON.parse(e.data)); }
+                    catch { appendEvent(e.data); }
+                };
+                es.onerror = () => appendEvent({error:'eventsource error'});
+
+                if (timer) clearInterval(timer);
+                refreshLedger();
+                timer = setInterval(refreshLedger, 2000);
+
+                btnStart.disabled = true;
+                btnStop.disabled = false;
+            }
+
+            function stop() {
+                if (es) es.close();
+                es = null;
+                if (timer) clearInterval(timer);
+                timer = null;
+                btnStart.disabled = false;
+                btnStop.disabled = true;
+                appendEvent({status:'stopped'});
+            }
+
+            btnStart.addEventListener('click', start);
+            btnStop.addEventListener('click', stop);
+        </script>
+    </body>
+</html>"""
+
+        return HTMLResponse(content=html)
+
+
+@app.get("/debug/stream")
+async def debug_stream(shop_phone: str = Query(default="*")) -> StreamingResponse:
+        if (settings.app_env or "").lower() in {"prod", "production"}:
+                raise HTTPException(status_code=404, detail="Not found")
+
+        key = "*" if (shop_phone or "").strip() == "*" else _shop_phone_key(shop_phone)
+        q = await _live.subscribe(key)
+
+        async def gen() -> Any:
+                try:
+                        hello = {
+                                "ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                                "kind": "connected",
+                                "shop_phone": key,
+                        }
+                        yield f"data: {json.dumps(hello)}\n\n"
+                        while True:
+                                event = await q.get()
+                                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                except asyncio.CancelledError:
+                        raise
+                finally:
+                        await _live.unsubscribe(key, q)
+
+        return StreamingResponse(
+                gen(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
 
 @app.get("/webhook/whatsapp")
@@ -99,12 +336,17 @@ async def _handle_confirmation(shop_phone: str, text: str) -> bool:
     expire_pending_actions(shop_phone)
     pending = get_latest_pending_action(shop_phone)
     if not pending:
+        logger.info("No pending action for %s (text=%s)", shop_phone, (text or "").strip()[:64])
+        await _live.publish(shop_phone, "confirm_no_pending", {"text": (text or "").strip()[:128]})
         return False
 
     if _is_yes(text):
         action_id = int(pending["id"])
         action_type = pending["action_type"]
         payload = pending["action_json"]
+
+        logger.info("Confirm YES: shop=%s action=%s pending_id=%s", shop_phone, action_type, action_id)
+        await _live.publish(shop_phone, "confirm_yes", {"pending_id": action_id, "action_type": action_type})
 
         try:
             if action_type == Intent.add_udhaar.value:
@@ -118,6 +360,7 @@ async def _handle_confirmation(shop_phone: str, text: str) -> bool:
                     source_message_id=payload.get("source_message_id"),
                 )
                 set_pending_action_status(action_id, "confirmed")
+                await _live.publish(shop_phone, "db_entry_created", {"entry_id": entry.get("id"), "amount": entry.get("amount")})
                 await send_text(
                     shop_phone,
                     f"Done. Added {_money(float(entry['amount']))} udhaar for {customer['name']}.",
@@ -130,6 +373,7 @@ async def _handle_confirmation(shop_phone: str, text: str) -> bool:
                 if not entry:
                     await send_text(shop_phone, "Nothing to undo.")
                     return True
+                await _live.publish(shop_phone, "db_entry_undone", {"entry_id": entry.get("id")})
                 await send_text(shop_phone, "Done. Last entry has been undone (marked reversed).")
                 return True
 
@@ -143,10 +387,13 @@ async def _handle_confirmation(shop_phone: str, text: str) -> bool:
             return True
 
     if _is_no(text):
+        logger.info("Confirm NO: shop=%s pending_id=%s", shop_phone, pending.get("id"))
+        await _live.publish(shop_phone, "confirm_no", {"pending_id": pending.get("id")})
         set_pending_action_status(int(pending["id"]), "cancelled")
         await send_text(shop_phone, "Okay, cancelled.")
         return True
 
+    await _live.publish(shop_phone, "confirm_need_yes_no", {"pending_id": pending.get("id"), "text": (text or "").strip()[:128]})
     await send_text(shop_phone, "Please reply YES to confirm or NO to cancel.")
     return True
 
@@ -156,8 +403,18 @@ async def _process_intent(
     source_message_id: str | None,
     raw_text: str,
     transcript: str | None,
+    pre_calculated_result: IntentResult | None = None,
 ) -> None:
-    result = extract_intent(raw_text)
+    result = pre_calculated_result or extract_intent(raw_text)
+
+    logger.info(
+        "Intent: shop=%s intent=%s conf=%.2f customer=%s amount=%s",
+        shop_phone,
+        getattr(result.intent, "value", str(result.intent)),
+        float(result.confidence),
+        (result.customer_name or "").strip()[:32],
+        result.amount,
+    )
 
     if result.confidence < settings.confidence_threshold:
         await send_text(
@@ -185,6 +442,7 @@ async def _process_intent(
             Intent.undo_last.value,
             {"source_message_id": source_message_id, "raw_text": raw_text},
         )
+        await _live.publish(shop_phone, "pending_created", {"action_type": Intent.undo_last.value})
         await send_text(shop_phone, "Confirm undo last entry? Reply YES or NO.")
         return
 
@@ -206,6 +464,11 @@ async def _process_intent(
                 "raw_text": raw_text,
                 "source_message_id": source_message_id,
             },
+        )
+        await _live.publish(
+            shop_phone,
+            "pending_created",
+            {"action_type": Intent.add_udhaar.value, "customer": result.customer_name.strip(), "amount": float(result.amount)},
         )
         await send_text(
             shop_phone,
@@ -259,6 +522,8 @@ async def whatsapp_webhook(
 
     messages = extract_messages(payload)
 
+    logger.info("WhatsApp webhook: %s message(s)", len(messages))
+
     # IMPORTANT: Always return 200 quickly to avoid WhatsApp retries.
     for msg in messages:
         try:
@@ -267,6 +532,9 @@ async def whatsapp_webhook(
             msg_id = msg.get("id")
             if not from_phone:
                 continue
+
+            logger.info("Incoming WhatsApp msg: from=%s type=%s id=%s", from_phone, msg_type, msg_id)
+            await _live.publish(from_phone, "incoming", {"type": msg_type, "id": msg_id})
 
             if msg_type == "text":
                 text = ((msg.get("text") or {}).get("body") or "").strip()
@@ -303,11 +571,41 @@ async def whatsapp_webhook(
                     await send_text(from_phone, "I couldn't transcribe that. Please resend the voice note.")
                     continue
 
+                await _live.publish(from_phone, "transcribed", {"text": transcript[:200]})
+
                 await _process_intent(
                     shop_phone=from_phone,
                     source_message_id=msg_id,
                     raw_text=transcript,
                     transcript=transcript,
+                )
+                continue
+
+            # Image messages (receipts/notes)
+            if msg_type == "image":
+                image = msg.get("image") or {}
+                media_id = image.get("id")
+                caption = image.get("caption") or ""
+                if not media_id:
+                    await send_text(from_phone, "Couldn't find image media id. Please try again.")
+                    continue
+
+                await send_text(from_phone, "Analyzing image... please wait.")
+                download_url, mime_type = await get_media_url(media_id)
+                image_bytes = await download_media(download_url)
+
+                # Analyze image with Gemini
+                result = await analyze_image(image_bytes, mime_type)
+
+                # If caption exists, maybe we can use it to improve confidence or context?
+                # For now, let's just use the image result.
+                
+                await _process_intent(
+                    shop_phone=from_phone,
+                    source_message_id=msg_id,
+                    raw_text=f"[Image detected] {caption}",
+                    transcript=caption,
+                    pre_calculated_result=result,
                 )
                 continue
 

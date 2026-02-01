@@ -76,6 +76,20 @@ def _name_norm(name: str) -> str:
     return " ".join((name or "").strip().lower().split())
 
 
+def _shop_phone_norm(shop_phone: str) -> str:
+    """Normalizes shop phone to a stable E.164-ish format: +<digits>.
+
+    WHY: WhatsApp webhooks provide digits-only numbers (e.g. 9195...), while
+    demo UI often uses +9195.... Without normalization, reads/writes hit
+    different rows and the ledger appears empty.
+    """
+
+    digits = "".join(ch for ch in (shop_phone or "") if ch.isdigit())
+    if digits.startswith("00"):
+        digits = digits[2:]
+    return f"+{digits}" if digits else ""
+
+
 def _roman_key(name: str) -> str:
     """Best-effort romanized/normalized form for fuzzy matching."""
 
@@ -111,6 +125,7 @@ def _ascii_key(name: str) -> str:
 
 
 def get_or_create_customer(shop_phone: str, customer_name: str) -> dict[str, Any]:
+    shop_phone = _shop_phone_norm(shop_phone)
     name = (customer_name or "").strip()
     if not name:
         raise ValueError("customer_name is required")
@@ -134,6 +149,7 @@ def get_or_create_customer(shop_phone: str, customer_name: str) -> dict[str, Any
 
 
 def create_pending_action(shop_phone: str, action_type: str, action_json: dict[str, Any]) -> dict[str, Any]:
+    shop_phone = _shop_phone_norm(shop_phone)
     now = dt.datetime.now(dt.timezone.utc)
     expires = now + dt.timedelta(seconds=settings.pending_action_ttl_seconds)
 
@@ -151,6 +167,7 @@ def create_pending_action(shop_phone: str, action_type: str, action_json: dict[s
 
 
 def get_latest_pending_action(shop_phone: str) -> dict[str, Any] | None:
+    shop_phone = _shop_phone_norm(shop_phone)
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     rows = _rest_get(
         "pending_actions",
@@ -186,11 +203,13 @@ def get_pending_action(*, shop_phone: str | None, pending_id: int | None) -> dic
 
     if not shop_phone:
         return None
-    expire_pending_actions(shop_phone)
-    return get_latest_pending_action(shop_phone)
+    shop_phone_n = _shop_phone_norm(shop_phone)
+    expire_pending_actions(shop_phone_n)
+    return get_latest_pending_action(shop_phone_n)
 
 
 def expire_pending_actions(shop_phone: str) -> None:
+    shop_phone = _shop_phone_norm(shop_phone)
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     _rest_patch(
         "pending_actions",
@@ -215,6 +234,7 @@ def insert_udhaar_entry(
     raw_text: str | None,
     source_message_id: str | None,
 ) -> dict[str, Any]:
+    shop_phone = _shop_phone_norm(shop_phone)
     rows = _rest_insert(
         "udhaar_entries",
         {
@@ -235,6 +255,7 @@ def undo_last_entry(shop_phone: str) -> dict[str, Any] | None:
     WHY: We never delete records; undo is a reversible audit trail.
     """
 
+    shop_phone = _shop_phone_norm(shop_phone)
     rows = _rest_get(
         "udhaar_entries",
         {
@@ -260,6 +281,8 @@ def undo_last_entry(shop_phone: str) -> dict[str, Any] | None:
 
 def get_summary(shop_phone: str) -> list[dict[str, Any]]:
     """Returns per-customer net udhaar for this shop."""
+
+    shop_phone = _shop_phone_norm(shop_phone)
 
     # Minimal approach: fetch recent and aggregate in Python.
     # WHY: keeps SQL/RPC complexity low for hackathon scale.
@@ -307,6 +330,7 @@ def get_customer_total(shop_phone: str, customer_name: str) -> dict[str, Any] | 
     - Aggregates across ALL matching customers (in case multiple rows exist for the same name)
     """
 
+    shop_phone = _shop_phone_norm(shop_phone)
     name = (customer_name or "").strip()
     if not name:
         return None
@@ -404,6 +428,7 @@ def get_recent_entries(shop_phone: str, limit: int = 20) -> list[dict[str, Any]]
     WHY: Used by the demo recorder page to show a live-updating ledger without requiring Supabase UI.
     """
 
+    shop_phone = _shop_phone_norm(shop_phone)
     limit = max(1, min(int(limit), 200))
 
     entries = _rest_get(
@@ -454,6 +479,7 @@ def create_payment_hold(
     due_at: str | None = None,
     hold_reason: str | None = None,
 ) -> dict[str, Any]:
+    shop_phone = _shop_phone_norm(shop_phone)
     try:
         rows = _rest_insert(
             "payment_holds",
@@ -474,6 +500,7 @@ def create_payment_hold(
 
 
 def list_payment_holds(shop_phone: str, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    shop_phone = _shop_phone_norm(shop_phone)
     limit = max(1, min(int(limit), 200))
     params: dict[str, str] = {
         "select": "id,customer_id,amount,status,hold_reason,due_at,created_at,last_notified_at,notify_count,resolved_at",
@@ -500,6 +527,8 @@ def list_due_payment_holds(
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     """Return open holds that are due/old enough AND not recently notified."""
+
+    shop_phone = _shop_phone_norm(shop_phone)
 
     limit = max(1, min(int(limit), 500))
     now = dt.datetime.now(dt.timezone.utc)
@@ -573,6 +602,7 @@ def insert_notification_log(
     provider_message_id: str | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
+    shop_phone = _shop_phone_norm(shop_phone)
     try:
         rows = _rest_insert(
             "notification_log",
@@ -607,6 +637,7 @@ def insert_notification_log(
 
 
 def list_notifications(shop_phone: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    shop_phone = _shop_phone_norm(shop_phone)
     limit = max(1, min(int(limit), 200))
     try:
         return _rest_get(
@@ -625,6 +656,7 @@ def list_notifications(shop_phone: str, *, limit: int = 50) -> list[dict[str, An
 
 
 def _attach_customer_names(shop_phone: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    shop_phone = _shop_phone_norm(shop_phone)
     if not rows:
         return []
     cust_ids = sorted({int(r["customer_id"]) for r in rows if r.get("customer_id") is not None})

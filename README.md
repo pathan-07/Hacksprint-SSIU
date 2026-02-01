@@ -46,6 +46,41 @@ Health check:
 Webhook:
 - `GET/POST http://localhost:8000/webhook/whatsapp`
 
+## WhatsApp setup (connect your phone)
+
+In test mode, you message the **Cloud API business/test number** from your own WhatsApp.
+
+1) Start the server:
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+2) Start a tunnel (example: ngrok) and copy the HTTPS URL:
+```bash
+ngrok http 8000
+```
+
+3) Meta Developers → WhatsApp → Configuration:
+- Callback URL: `https://<public-url>/webhook/whatsapp`
+- Verify token: same as `WHATSAPP_VERIFY_TOKEN` in `.env`
+- Turn on webhook field: `messages`
+
+4) Meta Developers → WhatsApp → API Setup:
+- Add your phone number as a test recipient and complete OTP verification.
+- If a `join <code>` message is shown, send that exact message to the test number once.
+
+5) From your WhatsApp app, send a text/voice note to the **test/business number** shown in API Setup.
+The bot should reply with a YES/NO confirmation flow.
+
+## Send a test message (no curl)
+
+Avoid pasting tokens into terminal history. This helper reads `WHATSAPP_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID` from `.env`:
+
+```bash
+python scripts/send_whatsapp.py template --to 919574896517 --name jaspers_market_plain_text_v1
+python scripts/send_whatsapp.py text --to 919574896517 --body "Hello from VoiceKhata demo"
+```
+
 ## Demo mode (no WhatsApp)
 
 If you can't set up Meta/WhatsApp tokens, you can demo the same voice-first flow using these endpoints:

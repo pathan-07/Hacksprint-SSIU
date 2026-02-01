@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="VoiceKhata — voice-first udhaar tracking on WhatsApp. Built for hackathon demos: simple, fast, and practical for small shops." />
+    <title>VoiceKhata — Voice-first Udhaar on WhatsApp</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%236ee7ff'/%3E%3Cstop offset='1' stop-color='%23a78bfa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='100' height='100' rx='22' fill='url(%23g)'/%3E%3Ctext x='50' y='62' font-size='42' text-anchor='middle' font-family='Arial' font-weight='800' fill='black'%3EVK%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="styles/main.css" />
+</head>
+<body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" data-header>
+        <div class="container header-inner">
+            <a class="brand" href="#top" aria-label="VoiceKhata home">
+                <span class="brand-mark" aria-hidden="true">VK</span>
+                <span class="brand-text">VoiceKhata</span>
+            </a>
+
+            <nav class="nav" aria-label="Primary" data-nav>
+                <a href="#problem">Problem</a>
+                <a href="#solution">Solution</a>
+                <a href="#demo">Demo</a>
+                <a href="#stack">Stack</a>
+                <a href="#faq">FAQ</a>
+            </nav>
+
+            <div class="header-actions">
+                <button class="icon-button" type="button" aria-label="Open menu" aria-expanded="false" data-menu-button>
+                    <span class="icon-button-bars" aria-hidden="true"></span>
+                </button>
+                <a class="button primary" href="#demo">See demo</a>
+            </div>
+        </div>
+    </header>
+
+    <main id="main">
+        <section id="top" class="hero">
+            <div class="container hero-grid">
+                <div class="hero-copy">
+                    <p class="eyebrow">Hackathon-ready demo</p>
+                    <h1>Track udhaar with a voice note — on WhatsApp.</h1>
+                    <p class="lead">
+                        VoiceKhata turns quick voice/text messages into a clean credit ledger with confirmations, summaries, and totals.
+                        No new app for shopkeepers.
+                    </p>
+                    <div class="cta-row">
+                        <a class="button primary" href="#demo">Try the demo flow</a>
+                        <a class="button ghost" href="http://localhost:8000/docs" target="_blank" rel="noreferrer" data-docs-link>Open API docs</a>
+                    </div>
+                    <div class="mini-stats" role="list">
+                        <div class="mini-stat" role="listitem">
+                            <div class="mini-stat-k" data-counter="12">0</div>
+                            <div class="mini-stat-l">sec to log udhaar</div>
+                        </div>
+                        <div class="mini-stat" role="listitem">
+                            <div class="mini-stat-k" data-counter="0">0</div>
+                            <div class="mini-stat-l">new app installs</div>
+                        </div>
+                        <div class="mini-stat" role="listitem">
+                            <div class="mini-stat-k" data-counter="2">0</div>
+                            <div class="mini-stat-l">step confirmation</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="hero-card" aria-label="Product preview">
+                    <div class="phone">
+                        <div class="phone-top">
+                            <div class="dot"></div><div class="dot"></div><div class="dot"></div>
+                            <div class="pill" aria-hidden="true"></div>
+                        </div>
+                        <div class="chat">
+                            <div class="msg them">Bhai, Ramesh ko 200 udhaar</div>
+                            <div class="msg bot">Confirm: Add ₹200 udhaar for Ramesh? Reply YES or NO.</div>
+                            <div class="msg them">YES ✅</div>
+                            <div class="msg bot">Done. Added ₹200 udhaar for Ramesh.</div>
+                            <div class="msg them">Ramesh ka total?</div>
+                            <div class="msg bot">Ramesh total: Net ₹200</div>
+                        </div>
+                        <div class="phone-bottom">
+                            <div class="kbd" aria-hidden="true"></div>
+                            <div class="send" aria-hidden="true"></div>
+                        </div>
+                    </div>
+                    <p class="hero-card-note">Voice + text supported. Confirmation prevents mistakes.</p>
+                </div>
+            </div>
+
+            <div class="bg-blobs" aria-hidden="true">
+                <div class="blob b1"></div>
+                <div class="blob b2"></div>
+                <div class="blob b3"></div>
+            </div>
+        </section>
+
+        <section id="problem" class="section">
+            <div class="container">
+                <h2>Problem</h2>
+                <div class="grid-3">
+                    <article class="card">
+                        <h3>Udhaar is informal</h3>
+                        <p>Small shops track credit in memory, notebooks, or random chats. Disputes happen.</p>
+                    </article>
+                    <article class="card">
+                        <h3>Typing is slow</h3>
+                        <p>During rush hours, nobody wants to open an app and fill a form.</p>
+                    </article>
+                    <article class="card">
+                        <h3>Errors are costly</h3>
+                        <p>A wrong amount or name creates arguments. We need a safety step.</p>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section id="solution" class="section alt">
+            <div class="container">
+                <h2>Solution</h2>
+                <p class="lead">A WhatsApp-first voice khata that confirms actions before saving.</p>
+
+                <div class="steps">
+                    <div class="step">
+                        <div class="step-n">1</div>
+                        <div class="step-b">
+                            <h3>Send voice/text</h3>
+                            <p>“Sita ko 150 udhaar add karo” or a voice note.</p>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-n">2</div>
+                        <div class="step-b">
+                            <h3>AI extracts intent</h3>
+                            <p>Understands customer + amount + action (add/total/summary/undo).</p>
+                        </div>
+                    </div>
+                    <div class="step">
+                        <div class="step-n">3</div>
+                        <div class="step-b">
+                            <h3>Confirm to save</h3>
+                            <p>Reply YES/NO. Safe by default, fast in practice.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="demo" class="section">
+            <div class="container">
+                <div class="section-head">
+                    <div>
+                        <h2>Live Demo (for judges)</h2>
+                        <p class="sub">This simulator shows the WhatsApp flow without needing WhatsApp during judging.</p>
+                    </div>
+
+                    <div class="health">
+                        <label class="field">
+                            <span>Backend URL</span>
+                            <input type="url" data-backend-url value="http://localhost:8000" placeholder="http://localhost:8000" />
+                        </label>
+                        <button class="button" type="button" data-health-check>Check API</button>
+                        <span class="badge" data-health-badge>Not checked</span>
+                    </div>
+                </div>
+
+                <div class="demo-grid">
+                    <div class="card demo-card">
+                        <h3>Try a command</h3>
+                        <p class="muted">Examples: “Ramesh ko 200 udhaar”, “Undo last”, “Summary”, “Raju ka total?”</p>
+
+                        <div class="demo-meta">
+                            <label class="field">
+                                <span>Shop phone</span>
+                                <input type="text" data-shop-phone value="+919999999999" placeholder="+919999999999" />
+                            </label>
+
+                            <div class="voice">
+                                <div class="voice-head">
+                                    <div>
+                                        <div class="pending-label">Voice demo</div>
+                                        <div class="muted">Record here → uploads to backend <span class="mono">/demo/voice</span></div>
+                                    </div>
+                                    <div class="voice-actions">
+                                        <button class="button" type="button" data-voice-start>Start</button>
+                                        <button class="button" type="button" data-voice-stop disabled>Stop & Upload</button>
+                                    </div>
+                                </div>
+                                <audio class="voice-audio" data-voice-audio controls hidden></audio>
+                            </div>
+
+                            <div class="pending">
+                                <div class="pending-label">Pending</div>
+                                <div class="pending-id" data-pending-id>—</div>
+                                <div class="pending-actions">
+                                    <button class="button" type="button" data-confirm-yes disabled>YES</button>
+                                    <button class="button" type="button" data-confirm-no disabled>NO</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="demo-input">
+                            <input type="text" data-demo-text value="Ramesh ko 200 udhaar" aria-label="Demo input" />
+                            <button class="button primary" type="button" data-demo-run>Run</button>
+                        </div>
+                        <div class="demo-quick">
+                            <button class="chip" type="button" data-demo-chip="Ramesh ko 200 udhaar">Add</button>
+                            <button class="chip" type="button" data-demo-chip="Ramesh ka total udhaar kitna hai?">Total</button>
+                            <button class="chip" type="button" data-demo-chip="Summary dikhado">Summary</button>
+                            <button class="chip" type="button" data-demo-chip="Undo last">Undo</button>
+                        </div>
+                    </div>
+
+                    <div class="card demo-card">
+                        <h3>What the bot does</h3>
+                        <ol class="timeline" data-demo-timeline>
+                            <li><span class="t">Receives message</span><span class="d">Voice/text from shopkeeper</span></li>
+                            <li><span class="t">Extracts intent</span><span class="d">Customer + amount + action</span></li>
+                            <li><span class="t">Asks confirmation</span><span class="d">Prevents accidental entries</span></li>
+                            <li><span class="t">Saves to ledger</span><span class="d">Supabase (Postgres)</span></li>
+                        </ol>
+                    </div>
+
+                    <div class="card demo-card">
+                        <h3>Simulated response</h3>
+                        <div class="terminal" aria-live="polite">
+                            <pre data-demo-output>Press Run to simulate…</pre>
+                        </div>
+
+                        <div class="ledger">
+                            <div class="ledger-head">
+                                <h4>Live ledger</h4>
+                                <button class="button" type="button" data-refresh-ledger>Refresh</button>
+                            </div>
+                            <div class="ledger-wrap" role="region" aria-label="Ledger table">
+                                <table class="ledger-table">
+                                    <thead>
+                                        <tr>
+                                            <th>ID</th>
+                                            <th>Customer</th>
+                                            <th>Amount</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody data-ledger-body>
+                                        <tr>
+                                            <td colspan="4" class="muted">Run a command to load…</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="demo-actions">
+                            <button class="button" type="button" data-copy-demo>Copy demo script</button>
+                            <a class="button ghost" href="#stack">See tech stack</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="stack" class="section alt">
+            <div class="container">
+                <h2>Tech Stack</h2>
+                <div class="grid-3">
+                    <article class="card">
+                        <h3>FastAPI</h3>
+                        <p>Webhook + API endpoints with clean async handling.</p>
+                    </article>
+                    <article class="card">
+                        <h3>Supabase (Postgres)</h3>
+                        <p>Persistent ledger: customers, entries, and pending confirmations.</p>
+                    </article>
+                    <article class="card">
+                        <h3>AI / Speech</h3>
+                        <p>Transcription + intent extraction for Hindi/Urdu-ish commands.</p>
+                    </article>
+                </div>
+
+                <div class="cta-band">
+                    <div>
+                        <h3>Judge flow in 30 seconds</h3>
+                        <p class="muted">Run backend → open this page → simulate messages → show API docs.</p>
+                    </div>
+                    <div class="cta-band-actions">
+                        <button class="button" type="button" data-scroll-to="top">Back to top</button>
+                        <a class="button primary" href="#demo">Run demo</a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="faq" class="section">
+            <div class="container">
+                <h2>FAQ</h2>
+                <div class="faq" data-faq>
+                    <details open>
+                        <summary>Do we need WhatsApp during judging?</summary>
+                        <p>No. Use the simulator above to show the exact flow. If WhatsApp is available, you can switch to the real webhook.</p>
+                    </details>
+                    <details>
+                        <summary>How do you prevent wrong entries?</summary>
+                        <p>Every write action creates a pending confirmation. Only after YES it gets saved.</p>
+                    </details>
+                    <details>
+                        <summary>Can it handle messy names?</summary>
+                        <p>Customer lookup supports suggestions/partial matches. For totals, it reports if multiple customers matched.</p>
+                    </details>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="container footer-inner">
+            <div>
+                <div class="brand footer-brand">
+                    <span class="brand-mark" aria-hidden="true">VK</span>
+                    <span class="brand-text">VoiceKhata</span>
+                </div>
+                <p class="muted">Voice-first udhaar ledger for small shops.</p>
+            </div>
+            <div class="footer-links">
+                <a href="#problem">Problem</a>
+                <a href="#solution">Solution</a>
+                <a href="#demo">Demo</a>
+                <a href="http://localhost:8000/health" target="_blank" rel="noreferrer" data-health-link>API health</a>
+            </div>
+            <div class="footer-meta">
+                <span>© <span data-year></span> VoiceKhata</span>
+                <span class="muted">Built for Hacksprint</span>
+            </div>
+        </div>
+    </footer>
+
+    <script src="scripts/main.js"></script>
+</body>
+</html>
