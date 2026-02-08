@@ -332,6 +332,15 @@ def _net_label(total: float) -> str:
         return f"Advance {_money(abs(total))}"
     return f"Net {_money(total)}"
 
+
+def _should_auto_confirm(result: IntentResult) -> bool:
+    threshold = settings.auto_confirm_threshold
+    if threshold <= 0:
+        return True
+    if threshold > 1:
+        return False
+    return float(result.confidence) >= float(threshold)
+
 async def _handle_confirmation(shop_phone: str, text: str) -> bool:
     expire_pending_actions(shop_phone)
     pending = get_latest_pending_action(shop_phone)
@@ -451,6 +460,27 @@ async def _process_intent(
             await send_text(
                 shop_phone,
                 "Please say customer name and amount.\nExample: 'Sita ko 150 udhaar add karo'",
+            )
+            return
+
+        if _should_auto_confirm(result):
+            customer = get_or_create_customer(shop_phone, result.customer_name.strip())
+            entry = insert_udhaar_entry(
+                shop_phone=shop_phone,
+                customer_id=int(customer["id"]),
+                amount=float(result.amount),
+                transcript=transcript,
+                raw_text=raw_text,
+                source_message_id=source_message_id,
+            )
+            await _live.publish(
+                shop_phone,
+                "db_entry_created",
+                {"entry_id": entry.get("id"), "amount": entry.get("amount"), "auto_confirmed": True},
+            )
+            await send_text(
+                shop_phone,
+                f"Done. Added {_money(float(entry['amount']))} udhaar for {customer['name']}.",
             )
             return
 

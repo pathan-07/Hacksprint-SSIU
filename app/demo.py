@@ -28,7 +28,7 @@ from .db import (
 )
 from .gemini_ai import extract_intent, transcribe_audio
 from .settings import settings
-from .types import Intent
+from .types import Intent, IntentResult
 
 logger = logging.getLogger(__name__)
 
@@ -479,6 +479,15 @@ def _net_label(total: float) -> str:
     return f"Net {_money(total)}"
 
 
+def _should_auto_confirm(result: IntentResult) -> bool:
+    threshold = settings.auto_confirm_threshold
+    if threshold <= 0:
+        return True
+    if threshold > 1:
+        return False
+    return float(result.confidence) >= float(threshold)
+
+
 def _commit_pending(pending: dict, *, decision: str) -> dict:
     if pending.get("status") != "pending":
         return {"status": "ignored", "message": f"Already {pending.get('status')}"}
@@ -630,6 +639,25 @@ def demo_text(body: DemoTextIn) -> dict:
                 "message": "Customer ka naam aur payment amount clear bolo (e.g., 'Raju ne 100 de diye').",
             }
 
+        if _should_auto_confirm(result):
+            customer = get_or_create_customer(body.shop_phone, result.customer_name.strip())
+            amt = float(result.amount)
+            entry = insert_udhaar_entry(
+                shop_phone=body.shop_phone,
+                customer_id=int(customer["id"]),
+                amount=-abs(amt),
+                transcript=None,
+                raw_text=text,
+                source_message_id=None,
+            )
+            return {
+                "status": "confirmed",
+                "auto_confirmed": True,
+                "intent": result.model_dump(),
+                "message": f"Done. Recorded payment {_money(abs(float(entry['amount'])))} from {customer['name']}",
+                "entry": entry,
+            }
+
         pending = create_pending_action(
             body.shop_phone,
             Intent.record_payment.value,
@@ -654,6 +682,24 @@ def demo_text(body: DemoTextIn) -> dict:
                 "status": "clarification_needed",
                 "intent": result.model_dump(),
                 "message": "Customer ka naam aur amount clear bolo (e.g., 'Sita ko 150 udhaar').",
+            }
+
+        if _should_auto_confirm(result):
+            customer = get_or_create_customer(body.shop_phone, result.customer_name.strip())
+            entry = insert_udhaar_entry(
+                shop_phone=body.shop_phone,
+                customer_id=int(customer["id"]),
+                amount=float(result.amount),
+                transcript=None,
+                raw_text=text,
+                source_message_id=None,
+            )
+            return {
+                "status": "confirmed",
+                "auto_confirmed": True,
+                "intent": result.model_dump(),
+                "message": f"Done. Added {_money(float(entry['amount']))} udhaar for {customer['name']}",
+                "entry": entry,
             }
 
         pending = create_pending_action(
@@ -771,6 +817,26 @@ async def demo_voice(shop_phone: str, file: UploadFile = File(...)) -> dict:
                 "message": "Customer ka naam aur payment amount clear bolo (e.g., 'Raju ne 100 de diye').",
             }
 
+        if _should_auto_confirm(result):
+            customer = get_or_create_customer(shop_phone, result.customer_name.strip())
+            amt = float(result.amount)
+            entry = insert_udhaar_entry(
+                shop_phone=shop_phone,
+                customer_id=int(customer["id"]),
+                amount=-abs(amt),
+                transcript=transcript,
+                raw_text=transcript,
+                source_message_id=None,
+            )
+            return {
+                "status": "confirmed",
+                "auto_confirmed": True,
+                "transcript": transcript,
+                "intent": result.model_dump(),
+                "message": f"Done. Recorded payment {_money(abs(float(entry['amount'])))} from {customer['name']}",
+                "entry": entry,
+            }
+
         pending = create_pending_action(
             shop_phone,
             Intent.record_payment.value,
@@ -797,6 +863,25 @@ async def demo_voice(shop_phone: str, file: UploadFile = File(...)) -> dict:
                 "transcript": transcript,
                 "intent": result.model_dump(),
                 "message": "Customer ka naam aur amount clear bolo (e.g., 'Raju 120 udhaar').",
+            }
+
+        if _should_auto_confirm(result):
+            customer = get_or_create_customer(shop_phone, result.customer_name.strip())
+            entry = insert_udhaar_entry(
+                shop_phone=shop_phone,
+                customer_id=int(customer["id"]),
+                amount=float(result.amount),
+                transcript=transcript,
+                raw_text=transcript,
+                source_message_id=None,
+            )
+            return {
+                "status": "confirmed",
+                "auto_confirmed": True,
+                "transcript": transcript,
+                "intent": result.model_dump(),
+                "message": f"Done. Added {_money(float(entry['amount']))} udhaar for {customer['name']}",
+                "entry": entry,
             }
 
         pending = create_pending_action(

@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     # Product behavior
     pending_action_ttl_seconds: int = Field(default=600, alias="PENDING_ACTION_TTL_SECONDS")
     confidence_threshold: float = Field(default=0.7, alias="CONFIDENCE_THRESHOLD")
+    auto_confirm_threshold: float = Field(default=0.9, alias="AUTO_CONFIRM_THRESHOLD")
 
 
 settings = Settings()
