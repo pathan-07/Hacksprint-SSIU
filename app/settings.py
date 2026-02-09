@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     confidence_threshold: float = Field(default=0.7, alias="CONFIDENCE_THRESHOLD")
     auto_confirm_threshold: float = Field(default=0.9, alias="AUTO_CONFIRM_THRESHOLD")
 
+    # Dev/test mode
+    test_mode: bool = Field(default=False, alias="TEST_MODE")
+
 
 settings = Settings()
 

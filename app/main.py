@@ -24,6 +24,7 @@ from .db import (
 )
 from .demo import router as demo_router
 from .gemini_ai import analyze_image, extract_intent, transcribe_audio
+from .gemini_ai import parse_text_message
 from .logging_config import setup_logging
 from .settings import require_secrets, settings
 from .types import Intent, IntentResult
@@ -341,6 +342,37 @@ def _should_auto_confirm(result: IntentResult) -> bool:
         return False
     return float(result.confidence) >= float(threshold)
 
+
+def _intent_from_text_parse(data: dict[str, Any]) -> IntentResult | None:
+    intent = str((data or {}).get("intent") or "").upper()
+
+    if intent == "ADD_TRANSACTION":
+        tx_type = str((data or {}).get("transaction_type") or "CREDIT").upper()
+        mapped = Intent.add_udhaar if tx_type == "CREDIT" else Intent.record_payment
+
+        amt_raw = (data or {}).get("amount")
+        amt: float | None = None
+        if amt_raw is not None:
+            try:
+                amt = float(amt_raw)
+            except Exception:
+                amt = None
+
+        return IntentResult(
+            intent=mapped,
+            customer_name=str((data or {}).get("customer_name") or ""),
+            amount=amt,
+            confidence=0.9,
+        )
+
+    if intent == "CHECK_BALANCE":
+        name = str((data or {}).get("customer_name") or "").strip()
+        if not name:
+            return None
+        return IntentResult(intent=Intent.get_customer_total, customer_name=name, amount=None, confidence=0.9)
+
+    return None
+
 async def _handle_confirmation(shop_phone: str, text: str) -> bool:
     expire_pending_actions(shop_phone)
     pending = get_latest_pending_action(shop_phone)
@@ -373,6 +405,29 @@ async def _handle_confirmation(shop_phone: str, text: str) -> bool:
                 await send_text(
                     shop_phone,
                     f"Done. Added {_money(float(entry['amount']))} udhaar for {customer['name']}.",
+                )
+                return True
+
+            if action_type == Intent.record_payment.value:
+                customer = get_or_create_customer(shop_phone, payload.get("customer_name", ""))
+                amt = float(payload["amount"])
+                entry = insert_udhaar_entry(
+                    shop_phone=shop_phone,
+                    customer_id=int(customer["id"]),
+                    amount=-abs(amt),
+                    transcript=payload.get("transcript"),
+                    raw_text=payload.get("raw_text"),
+                    source_message_id=payload.get("source_message_id"),
+                )
+                set_pending_action_status(action_id, "confirmed")
+                await _live.publish(
+                    shop_phone,
+                    "db_entry_created",
+                    {"entry_id": entry.get("id"), "amount": entry.get("amount")},
+                )
+                await send_text(
+                    shop_phone,
+                    f"Done. Recorded payment {_money(abs(float(entry['amount'])))} from {customer['name']}.",
                 )
                 return True
 
@@ -453,6 +508,62 @@ async def _process_intent(
         )
         await _live.publish(shop_phone, "pending_created", {"action_type": Intent.undo_last.value})
         await send_text(shop_phone, "Confirm undo last entry? Reply YES or NO.")
+        return
+
+    if result.intent == Intent.record_payment:
+        if not result.customer_name.strip() or result.amount is None:
+            await send_text(
+                shop_phone,
+                "Customer ka naam aur payment amount clear bolo (e.g., 'Raju ne 100 de diye').",
+            )
+            return
+
+        if _should_auto_confirm(result):
+            customer = get_or_create_customer(shop_phone, result.customer_name.strip())
+            amt = float(result.amount)
+            entry = insert_udhaar_entry(
+                shop_phone=shop_phone,
+                customer_id=int(customer["id"]),
+                amount=-abs(amt),
+                transcript=transcript,
+                raw_text=raw_text,
+                source_message_id=source_message_id,
+            )
+            await _live.publish(
+                shop_phone,
+                "db_entry_created",
+                {"entry_id": entry.get("id"), "amount": entry.get("amount"), "auto_confirmed": True},
+            )
+            await send_text(
+                shop_phone,
+                f"Done. Recorded payment {_money(abs(float(entry['amount'])))} from {customer['name']}.",
+            )
+            return
+
+        create_pending_action(
+            shop_phone,
+            Intent.record_payment.value,
+            {
+                "customer_name": result.customer_name.strip(),
+                "amount": float(result.amount),
+                "transcript": transcript,
+                "raw_text": raw_text,
+                "source_message_id": source_message_id,
+            },
+        )
+        await _live.publish(
+            shop_phone,
+            "pending_created",
+            {
+                "action_type": Intent.record_payment.value,
+                "customer": result.customer_name.strip(),
+                "amount": float(result.amount),
+            },
+        )
+        await send_text(
+            shop_phone,
+            f"Confirm: Record payment {_money(float(result.amount))} from {result.customer_name.strip()}? Reply YES or NO.",
+        )
         return
 
     if result.intent == Intent.add_udhaar:
@@ -577,11 +688,14 @@ async def whatsapp_webhook(
                     continue
 
                 # Otherwise treat text like a command.
+                parsed = await parse_text_message(text)
+                parsed_intent = _intent_from_text_parse(parsed)
                 await _process_intent(
                     shop_phone=from_phone,
                     source_message_id=msg_id,
                     raw_text=text,
                     transcript=None,
+                    pre_calculated_result=parsed_intent,
                 )
                 continue
 

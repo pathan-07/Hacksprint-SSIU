@@ -19,6 +19,9 @@ Create `.env` (copy from `.env.example`) and fill:
 - `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `GEMINI_API_KEY`
+Optional dev flags:
+- `ENABLE_WHATSAPP=true` to enable the webhook handler
+- `TEST_MODE=true` to print outbound WhatsApp replies instead of sending
 
 ## 2) Create DB tables (Supabase)
 
@@ -45,6 +48,24 @@ Health check:
 
 Webhook:
 - `GET/POST http://localhost:8000/webhook/whatsapp`
+
+## Local testing (no real WhatsApp)
+
+Mock an incoming WhatsApp text message and keep replies in the console:
+
+1) Start the server:
+```bash
+ENABLE_WHATSAPP=true TEST_MODE=true uvicorn app.main:app --reload
+```
+
+2) Send a fake webhook payload:
+```bash
+python scripts/fake_whatsapp.py
+```
+
+This hits `http://localhost:8000/webhook/whatsapp` with a WhatsApp-shaped JSON payload.
+
+Note: If Gemini quota is exhausted, the app falls back to a simple heuristic parser for common Hindi/Hinglish text.
 
 ## WhatsApp setup (connect your phone)
 
@@ -104,6 +125,29 @@ Direct voice recording in browser:
 - Open `http://127.0.0.1:8000/demo/record` and record/upload from the page.
 
 To run without WhatsApp config, set `ENABLE_WHATSAPP=false` in your `.env`.
+
+## Admin dashboard (Next.js)
+
+The admin UI lives in `web-dashboard/` and reads from the same Supabase tables.
+
+Setup:
+```bash
+cd web-dashboard
+npm install
+```
+
+Create `.env.local` in `web-dashboard/`:
+```
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url_here
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key_here
+```
+
+Run:
+```bash
+npm run dev
+```
+
+Open http://localhost:3000 to view the dashboard.
 
 ## Notes
 

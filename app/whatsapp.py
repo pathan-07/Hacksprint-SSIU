@@ -89,6 +89,10 @@ async def download_media(download_url: str) -> bytes:
 
 
 async def send_text(to_phone: str, text: str) -> None:
+    if settings.test_mode:
+        print(f"\n[MOCK WHATSAPP] Sending to {to_phone}: {text}\n")
+        return None
+
     url = _messages_url()
     headers = {
         "Authorization": f"Bearer {settings.whatsapp_token}",

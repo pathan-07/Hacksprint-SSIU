@@ -24,6 +24,141 @@ def _get_client() -> genai.Client:
     return _client
 
 
+_transaction_schema: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["ADD_TRANSACTION", "CHECK_BALANCE", "UNKNOWN"]},
+        "customer_name": {"type": "string"},
+        "amount": {"type": "number"},
+        "transaction_type": {"type": "string", "enum": ["CREDIT", "PAYMENT"]},
+        "item_description": {"type": "string"},
+    },
+    "required": ["intent"],
+}
+
+
+_PAYMENT_HINTS = [
+    "jama",
+    "de diya",
+    "de diye",
+    "de gaya",
+    "payment",
+    "paid",
+    "received",
+    "collect",
+]
+
+_CREDIT_HINTS = [
+    "udhar",
+    "udhaar",
+    "baaki",
+    "le gaya",
+    "le liya",
+    "liya",
+    "credit",
+]
+
+
+def _heuristic_text_parse(text: str) -> dict[str, Any]:
+    t = " ".join((text or "").strip().lower().split())
+    if not t:
+        return {"intent": "UNKNOWN"}
+
+    maybe_total = _maybe_total_query(text)
+    if maybe_total:
+        return {"intent": "CHECK_BALANCE", "customer_name": maybe_total}
+
+    amount_match = re.search(r"\d+(?:\.\d+)?", t)
+    amount = float(amount_match.group(0)) if amount_match else None
+
+    tx_type = "CREDIT"
+    if any(h in t for h in _PAYMENT_HINTS):
+        tx_type = "PAYMENT"
+    elif any(h in t for h in _CREDIT_HINTS):
+        tx_type = "CREDIT"
+
+    name = ""
+    if amount_match:
+        before = t[: amount_match.start()].strip()
+        for token in ["ne", "ko", "se", "ka", "ki", "ke", "rs", "rupay", "rupees"]:
+            before = before.replace(f" {token} ", " ").replace(f" {token}", " ").replace(f"{token} ", " ")
+        before = " ".join(before.split())
+        name = before
+    else:
+        tokens = t.split()
+        if tokens:
+            name = tokens[0]
+
+    if not amount:
+        return {"intent": "UNKNOWN"}
+
+    return {
+        "intent": "ADD_TRANSACTION",
+        "customer_name": name.title() if name else "",
+        "amount": amount,
+        "transaction_type": tx_type,
+        "item_description": "Text entry",
+    }
+
+
+def _safe_json_parse(raw: str) -> dict[str, Any]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start : end + 1]
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+async def parse_text_message(text: str) -> dict[str, Any]:
+    """Parse a plain text message into a transaction intent.
+
+    Returns a dict that matches _transaction_schema.
+    """
+
+    if not (text or "").strip():
+        return {"intent": "UNKNOWN"}
+
+    heuristic = _heuristic_text_parse(text)
+    if heuristic.get("intent") in {"ADD_TRANSACTION", "CHECK_BALANCE"}:
+        return heuristic
+
+    prompt = (
+        "Analyze this shopkeeper's message and extract transaction details. "
+        "Rules: 'udhar', 'baaki', 'le gaya' => CREDIT. "
+        "'jama', 'de gaya', 'received' => PAYMENT. "
+        "Return ONLY JSON matching the schema.\n\n"
+        f"Message: {text}"
+    )
+
+    client = _get_client()
+    try:
+        resp = client.models.generate_content(
+            model=settings.gemini_intent_model,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=prompt)])],
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
+        data = _safe_json_parse(resp.text or "")
+        if data:
+            return data
+    except Exception:
+        logger.exception("Gemini text parsing failed")
+
+    return _heuristic_text_parse(text)
+
+
 async def transcribe_audio(audio_bytes: bytes, mime_type: str | None) -> str:
     """Transcribe WhatsApp voice note to text using Gemini.
 
