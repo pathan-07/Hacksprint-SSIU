@@ -10,7 +10,7 @@ type LedgerRow = {
   reversed: boolean | null;
   raw_text: string | null;
   transcript: string | null;
-  customers: { name: string } | null;
+  customers: { name: string }[] | null;
 };
 
 const formatAmount = (value: number) => {
@@ -60,7 +60,9 @@ export default function Home() {
       .filter((row) => row.amount > 0 && row.created_at.startsWith(todayKey))
       .reduce((sum, row) => sum + row.amount, 0);
     const activeCustomers = new Set(
-      rows.map((row) => (row.customers?.name || "").trim()).filter(Boolean),
+      rows
+        .map((row) => (row.customers?.[0]?.name || "").trim())
+        .filter(Boolean),
     ).size;
     return { totalUdhar, todaysSales, activeCustomers };
   }, [rows]);
@@ -158,7 +160,7 @@ export default function Home() {
                         {new Date(row.created_at).toLocaleString()}
                       </td>
                       <td className="py-4 font-semibold">
-                        {row.customers?.name || "Unknown"}
+                        {row.customers?.[0]?.name || "Unknown"}
                       </td>
                       <td className="py-4 text-[color:var(--muted)]">
                         {note}
