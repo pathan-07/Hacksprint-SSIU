@@ -21,9 +21,10 @@ from .db import (
     set_pending_action_status,
     undo_last_entry,
     get_customer_total,
+    process_inventory_transaction,
 )
 from .demo import router as demo_router
-from .gemini_ai import analyze_image, extract_intent, transcribe_audio
+from .gemini_ai import analyze_image, extract_intent, parse_bill_image, transcribe_audio
 from .gemini_ai import parse_text_message
 from .logging_config import setup_logging
 from .settings import require_secrets, settings
@@ -47,6 +48,19 @@ def _shop_phone_key(shop_phone: str) -> str:
     # Keep consistent with DB normalization: "+<digits>".
     digits = "".join(ch for ch in (shop_phone or "") if ch.isdigit())
     return f"+{digits}" if digits else (shop_phone or "")
+
+
+def _bill_link(link_id: str | None) -> str | None:
+    if not link_id:
+        return None
+    return f"http://localhost:3000/pay/{link_id}"
+
+
+async def _safe_send_text(to_phone: str, text: str) -> None:
+    try:
+        await send_text(to_phone, text)
+    except Exception:
+        logger.exception("WhatsApp send failed (ignored)")
 
 
 class _LiveHub:
@@ -689,7 +703,34 @@ async def whatsapp_webhook(
 
                 # Otherwise treat text like a command.
                 parsed = await parse_text_message(text)
+                logger.info("Parsed JSON: %s", parsed)
                 parsed_intent = _intent_from_text_parse(parsed)
+                if parsed_intent and parsed_intent.intent == Intent.add_udhaar and (parsed.get("items") or []):
+                    data = {
+                        "customer_name": parsed.get("customer_name"),
+                        "amount": parsed.get("amount"),
+                        "transaction_type": parsed.get("transaction_type") or "CREDIT",
+                        "items": parsed.get("items") or [],
+                        "raw_text": text,
+                        "transcript": None,
+                        "source_message_id": msg_id,
+                    }
+                    result = process_inventory_transaction(from_phone, data)
+                    if result.get("status") == "ok":
+                        msg_lines = [
+                            f"Bill: {_money(float(result['amount']))}",
+                            f"Items: {result.get('items')}",
+                        ]
+                        if result.get("new_balance") is not None:
+                            msg_lines.append(f"{result.get('customer')} balance: {_money(float(result['new_balance']))}")
+                        link = _bill_link(result.get("link_id"))
+                        if link:
+                            msg_lines.extend(["", f"Share bill link: {link}"])
+                        await send_text(from_phone, "\n".join(msg_lines))
+                    else:
+                        await send_text(from_phone, "Inventory update failed. Please check stock and try again.")
+                    continue
+
                 await _process_intent(
                     shop_phone=from_phone,
                     source_message_id=msg_id,
@@ -734,16 +775,58 @@ async def whatsapp_webhook(
                     await send_text(from_phone, "Couldn't find image media id. Please try again.")
                     continue
 
-                await send_text(from_phone, "Analyzing image... please wait.")
-                download_url, mime_type = await get_media_url(media_id)
-                image_bytes = await download_media(download_url)
+                await _safe_send_text(from_phone, "Analyzing image... please wait.")
 
-                # Analyze image with Gemini
-                result = await analyze_image(image_bytes, mime_type)
+                if settings.test_mode:
+                    data = {
+                        "intent": "RESTOCK",
+                        "items": [
+                            {"product_name": "Demo Item A", "quantity": 10, "unit": "pcs"},
+                            {"product_name": "Demo Item B", "quantity": 5, "unit": "kg"},
+                        ],
+                    }
+                else:
+                    try:
+                        download_url, mime_type = await get_media_url(media_id)
+                        image_bytes = await download_media(download_url)
+                        data = await parse_bill_image(image_bytes, mime_type or "image/jpeg")
+                    except Exception:
+                        logger.exception("Failed to download bill image")
+                        await _safe_send_text(from_phone, "Couldn't download image. Please try again.")
+                        continue
 
-                # If caption exists, maybe we can use it to improve confidence or context?
-                # For now, let's just use the image result.
-                
+                if data.get("intent") == "RESTOCK" and (data.get("items") or []):
+                    data["customer_name"] = "Supplier"
+                    data["transaction_type"] = "RESTOCK"
+                    data["raw_text"] = caption
+                    data["source_message_id"] = msg_id
+                    result = process_inventory_transaction(from_phone, data)
+                    if result.get("status") == "ok":
+                        msg_lines = [
+                            "Bill scan complete.",
+                            f"Added: {result.get('items')}",
+                        ]
+                        link = _bill_link(result.get("link_id"))
+                        if link:
+                            msg_lines.extend(["", f"Share bill link: {link}"])
+                        await _safe_send_text(from_phone, "\n".join(msg_lines))
+                    else:
+                        await _safe_send_text(from_phone, "Bill scan failed. Please try again.")
+                    continue
+
+                # Fallback to generic image intent handling
+                if settings.test_mode:
+                    result = IntentResult(intent=Intent.get_summary, customer_name="", amount=None, confidence=0.0)
+                else:
+                    try:
+                        download_url, mime_type = await get_media_url(media_id)
+                        image_bytes = await download_media(download_url)
+                        result = await analyze_image(image_bytes, mime_type)
+                    except Exception:
+                        logger.exception("Failed to download image for analysis")
+                        await _safe_send_text(from_phone, "Couldn't download image. Please try again.")
+                        continue
+
                 await _process_intent(
                     shop_phone=from_phone,
                     source_message_id=msg_id,

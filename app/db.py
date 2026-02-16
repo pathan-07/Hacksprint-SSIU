@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import difflib
+import uuid
 from typing import Any
 
 import httpx
@@ -51,7 +52,8 @@ def _rest_url(table: str) -> str:
 
 def _rest_get(table: str, params: dict[str, str]) -> list[dict[str, Any]]:
     r = _get_http().get(_rest_url(table), params=params, headers=_headers())
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase GET {table} failed ({r.status_code}): {r.text}")
     return r.json() or []
 
 
@@ -63,17 +65,36 @@ def _rest_insert(
     prefer: str = "return=representation",
 ) -> list[dict[str, Any]]:
     r = _get_http().post(_rest_url(table), params=params, json=body, headers=_headers(prefer))
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase INSERT {table} failed ({r.status_code}): {r.text}")
     return r.json() or []
 
 
 def _rest_patch(table: str, params: dict[str, str], body: dict[str, Any]) -> None:
     r = _get_http().patch(_rest_url(table), params=params, json=body, headers=_headers())
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"Supabase PATCH {table} failed ({r.status_code}): {r.text}")
 
 
 def _name_norm(name: str) -> str:
     return " ".join((name or "").strip().lower().split())
+
+
+def _product_name_norm(name: str) -> str:
+    return _name_norm(name)
+
+
+def _product_stock(row: dict[str, Any]) -> int:
+    if row.get("stock_quantity") is not None:
+        return int(row.get("stock_quantity") or 0)
+    return int(row.get("current_stock") or 0)
+
+
+def _product_phone(row: dict[str, Any]) -> str:
+    value = row.get("merchant_phone")
+    if value is None:
+        value = row.get("shop_phone")
+    return _shop_phone_norm(str(value or ""))
 
 
 def _shop_phone_norm(shop_phone: str) -> str:
@@ -124,6 +145,415 @@ def _ascii_key(name: str) -> str:
     return norm
 
 
+def _list_products(merchant_phone: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    merchant_phone = _shop_phone_norm(merchant_phone)
+    limit = max(1, min(int(limit), 1000))
+    try:
+        rows = _rest_get(
+            "products",
+            {
+                "select": "*",
+                "limit": str(limit),
+            },
+        )
+        return [r for r in rows if _product_phone(r) == merchant_phone]
+    except Exception as e:
+        if "PGRST" in str(e) or "does not exist" in str(e):
+            return []
+        raise
+
+
+def get_products_by_names(merchant_phone: str, product_names: list[str]) -> dict[str, dict[str, Any]]:
+    if not product_names:
+        return {}
+    names = {_product_name_norm(n) for n in product_names if (n or "").strip()}
+    if not names:
+        return {}
+    rows = _list_products(merchant_phone)
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = _product_name_norm(str(row.get("normalized_name") or row.get("name") or ""))
+        if key in names:
+            out[key] = row
+    return out
+
+
+def apply_inventory_sale(
+    shop_phone: str,
+    items: list[dict[str, Any]],
+    *,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    merchant_phone = _shop_phone_norm(shop_phone)
+    items = items or []
+    if not items:
+        return {"status": "empty", "total": 0.0, "line_items": []}
+
+    product_names: list[str] = []
+    for item in items:
+        name = str(item.get("product_name") or item.get("name") or "").strip()
+        if name:
+            product_names.append(name)
+
+    products = get_products_by_names(merchant_phone, product_names)
+
+    missing_products: list[str] = []
+    missing_prices: list[str] = []
+    insufficient_stock: list[dict[str, Any]] = []
+    line_items: list[dict[str, Any]] = []
+    total = 0.0
+
+    for item in items:
+        name = str(item.get("product_name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        norm = _product_name_norm(name)
+        product = products.get(norm)
+        if not product:
+            missing_products.append(name)
+            continue
+
+        try:
+            qty = float(item.get("quantity") or 0)
+        except Exception:
+            qty = 0.0
+        if qty <= 0:
+            continue
+
+        price = product.get("selling_price")
+        if price is None:
+            missing_prices.append(name)
+            continue
+
+        stock = _product_stock(product)
+        if stock < qty:
+            insufficient_stock.append(
+                {
+                    "product_name": product.get("name") or name,
+                    "available": stock,
+                    "requested": qty,
+                }
+            )
+            continue
+
+        line_total = float(price) * float(qty)
+        total += line_total
+        line_items.append(
+            {
+                "product_id": product.get("id"),
+                "product_name": product.get("name") or name,
+                "quantity": qty,
+                "unit": item.get("unit") or product.get("unit"),
+                "price": float(price),
+                "line_total": line_total,
+                "stock_before": stock,
+                "stock_after": stock - int(qty),
+            }
+        )
+
+    if missing_products or missing_prices or insufficient_stock:
+        return {
+            "status": "error",
+            "missing_products": missing_products,
+            "missing_prices": missing_prices,
+            "insufficient_stock": insufficient_stock,
+            "total": total,
+            "line_items": line_items,
+        }
+
+    try:
+        for line in line_items:
+            pid = int(line["product_id"])
+            stock_field = "stock_quantity"
+            product = products.get(_product_name_norm(str(line.get("product_name") or ""))) or {}
+            if product.get("stock_quantity") is None and product.get("current_stock") is not None:
+                stock_field = "current_stock"
+            _rest_patch(
+                "products",
+                {"id": f"eq.{pid}"},
+                {stock_field: int(line["stock_after"])},
+            )
+            _rest_insert(
+                "inventory_logs",
+                {
+                    "product_id": pid,
+                    "change_type": "SALE",
+                    "quantity_change": -int(line["quantity"]),
+                    "notes": notes,
+                },
+            )
+    except Exception as e:
+        if _is_missing_table_error(e):
+            raise RuntimeError("Supabase schema missing: run supabase/schema.sql (products, inventory_logs)")
+        raise
+
+    return {"status": "ok", "total": total, "line_items": line_items}
+
+
+def apply_inventory_restock(
+    shop_phone: str,
+    items: list[dict[str, Any]],
+    *,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    merchant_phone = _shop_phone_norm(shop_phone)
+    items = items or []
+    if not items:
+        return {"status": "empty", "total": 0.0, "line_items": []}
+
+    product_names: list[str] = []
+    for item in items:
+        name = str(item.get("product_name") or item.get("name") or "").strip()
+        if name:
+            product_names.append(name)
+
+    products = get_products_by_names(merchant_phone, product_names)
+    line_items: list[dict[str, Any]] = []
+    total = 0.0
+
+    for item in items:
+        name = str(item.get("product_name") or item.get("name") or "").strip()
+        if not name:
+            continue
+        norm = _product_name_norm(name)
+        product = products.get(norm)
+
+        try:
+            qty = float(item.get("quantity") or 0)
+        except Exception:
+            qty = 0.0
+        if qty <= 0:
+            continue
+
+        unit = item.get("unit") or (product.get("unit") if product else None) or "pcs"
+        cost_price = item.get("cost_price")
+        try:
+            cost_price_f = float(cost_price) if cost_price is not None else None
+        except Exception:
+            cost_price_f = None
+
+        if not product:
+            payload_candidates: list[tuple[dict[str, Any], dict[str, str] | None, str]] = [
+                (
+                    {
+                        "merchant_phone": merchant_phone,
+                        "name": name,
+                        "normalized_name": _product_name_norm(name),
+                        "cost_price": cost_price_f,
+                        "stock_quantity": 0,
+                        "unit": unit,
+                    },
+                    {"on_conflict": "merchant_phone,normalized_name"},
+                    "resolution=merge-duplicates,return=representation",
+                ),
+                (
+                    {
+                        "merchant_phone": merchant_phone,
+                        "name": name,
+                        "cost_price": cost_price_f,
+                        "stock_quantity": 0,
+                        "unit": unit,
+                    },
+                    None,
+                    "return=representation",
+                ),
+                (
+                    {
+                        "merchant_phone": merchant_phone,
+                        "name": name,
+                        "cost_price": cost_price_f,
+                        "current_stock": 0,
+                        "unit": unit,
+                    },
+                    None,
+                    "return=representation",
+                ),
+                (
+                    {
+                        "merchant_phone": merchant_phone,
+                        "name": name,
+                        "cost_price": cost_price_f,
+                        "unit": unit,
+                    },
+                    None,
+                    "return=representation",
+                ),
+                (
+                    {
+                        "merchant_phone": merchant_phone,
+                        "name": name,
+                    },
+                    None,
+                    "return=representation",
+                ),
+            ]
+
+            last_exc: Exception | None = None
+            for payload_i, params_i, prefer_i in payload_candidates:
+                try:
+                    rows = _rest_insert("products", payload_i, params=params_i, prefer=prefer_i)
+                    product = rows[0] if rows else None
+                    if product:
+                        break
+                except Exception as ex:
+                    last_exc = ex
+                    continue
+
+            if not product and last_exc:
+                raise last_exc
+
+        if not product:
+            continue
+
+        stock = _product_stock(product)
+        new_stock = stock + int(qty)
+        stock_field = "stock_quantity" if product.get("stock_quantity") is not None or product.get("current_stock") is None else "current_stock"
+        norm_field = "normalized_name" if product.get("normalized_name") is not None or product.get("name_norm") is None else "name_norm"
+        patch_body: dict[str, Any] = {stock_field: new_stock}
+        if "unit" in product:
+            patch_body["unit"] = unit
+        if norm_field in product:
+            patch_body[norm_field] = _product_name_norm(name)
+        if cost_price_f is not None and "cost_price" in product:
+            patch_body["cost_price"] = cost_price_f
+        _rest_patch(
+            "products",
+            {"id": f"eq.{int(product['id'])}"},
+            patch_body,
+        )
+
+        _rest_insert(
+            "inventory_logs",
+            {
+                "product_id": int(product["id"]),
+                "change_type": "RESTOCK",
+                "quantity_change": int(qty),
+                "notes": notes,
+            },
+        )
+
+        line_total = float(cost_price_f) * float(qty) if cost_price_f is not None else 0.0
+        total += line_total
+        line_items.append(
+            {
+                "product_id": product.get("id"),
+                "product_name": product.get("name") or name,
+                "quantity": qty,
+                "unit": unit,
+                "cost_price": cost_price_f,
+                "line_total": line_total,
+                "stock_before": stock,
+                "stock_after": new_stock,
+            }
+        )
+
+    return {"status": "ok", "total": total, "line_items": line_items}
+
+
+def process_inventory_transaction(merchant_phone: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Process a transaction with optional inventory items.
+
+    - If amount is provided (>0), it is used as final amount.
+    - Otherwise, amount is derived from product prices.
+    - Stock is updated and inventory_logs are written for CREDIT (sale) items.
+    """
+
+    shop_phone = _shop_phone_norm(merchant_phone)
+    customer_name = str(data.get("customer_name") or "").strip()
+    if not customer_name:
+        return {"status": "error", "message": "customer_name is required"}
+
+    customer = get_or_create_customer(shop_phone, customer_name)
+    tx_type = str(data.get("transaction_type") or "CREDIT").upper()
+
+    items = data.get("items") or []
+    sale_result: dict[str, Any] = {"status": "empty", "total": 0.0, "line_items": []}
+    inventory_notice = None
+    if items:
+        if tx_type == "CREDIT":
+            sale_result = apply_inventory_sale(
+                shop_phone,
+                items,
+                notes=f"Sale to {customer_name}",
+            )
+            if sale_result.get("status") == "error":
+                return {
+                    "status": "error",
+                    "message": "inventory_check_failed",
+                    "details": sale_result,
+                }
+        elif tx_type == "RESTOCK":
+            sale_result = apply_inventory_restock(
+                shop_phone,
+                items,
+                notes=f"Restock from {customer_name}",
+            )
+        else:
+            inventory_notice = "items_ignored_for_payment"
+
+    try:
+        amt_raw = float(data.get("amount") or 0)
+    except Exception:
+        amt_raw = 0.0
+
+    total_from_items = float(sale_result.get("total") or 0.0)
+    final_amount = amt_raw if amt_raw > 0 else total_from_items
+
+    if tx_type == "RESTOCK":
+        signed_amount = 0.0
+    elif tx_type == "PAYMENT":
+        signed_amount = -abs(final_amount)
+    else:
+        signed_amount = abs(final_amount)
+
+    if tx_type == "RESTOCK":
+        items_summary = ", ".join(
+            [
+                f"{line.get('quantity')} {line.get('unit')} {line.get('product_name')}"
+                for line in sale_result.get("line_items") or []
+            ]
+        )
+        return {
+            "status": "ok",
+            "customer": customer.get("name"),
+            "amount": float(final_amount),
+            "items": items_summary or "Manual Entry",
+            "new_balance": None,
+            "inventory_notice": inventory_notice,
+            "entry": None,
+            "line_items": sale_result.get("line_items") or [],
+        }
+
+    entry = insert_udhaar_entry(
+        shop_phone=shop_phone,
+        customer_id=int(customer["id"]),
+        amount=float(signed_amount),
+        transcript=str(data.get("transcript") or "") or None,
+        raw_text=str(data.get("raw_text") or "") or None,
+        source_message_id=data.get("source_message_id"),
+    )
+
+    info = get_customer_total(shop_phone, customer_name)
+    new_balance = None
+    if info and info.get("status") == "ok":
+        new_balance = float(info.get("total") or 0.0)
+
+    items_summary = ", ".join(
+        [f"{line.get('quantity')} {line.get('unit')} {line.get('product_name')}" for line in sale_result.get("line_items") or []]
+    )
+
+    return {
+        "status": "ok",
+        "customer": customer.get("name"),
+        "amount": float(final_amount),
+        "items": items_summary or "Manual Entry",
+        "new_balance": new_balance,
+        "inventory_notice": inventory_notice,
+        "entry": entry,
+        "line_items": sale_result.get("line_items") or [],
+    }
+
+
 def get_or_create_customer(shop_phone: str, customer_name: str) -> dict[str, Any]:
     shop_phone = _shop_phone_norm(shop_phone)
     name = (customer_name or "").strip()
@@ -145,7 +575,19 @@ def get_or_create_customer(shop_phone: str, customer_name: str) -> dict[str, Any
     )
     if not rows:
         raise RuntimeError("Failed to upsert customer")
-    return rows[0]
+    customer = rows[0]
+
+    # Ensure secure public link id exists for bill sharing.
+    if not customer.get("link_id"):
+        link_id = str(uuid.uuid4())
+        try:
+            _rest_patch("customers", {"id": f"eq.{int(customer['id'])}"}, {"link_id": link_id})
+            customer["link_id"] = link_id
+        except Exception:
+            # Column may not exist until migration runs.
+            pass
+
+    return customer
 
 
 def create_pending_action(shop_phone: str, action_type: str, action_json: dict[str, Any]) -> dict[str, Any]:

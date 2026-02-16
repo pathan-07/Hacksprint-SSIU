@@ -27,11 +27,21 @@ def _get_client() -> genai.Client:
 _transaction_schema: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "intent": {"type": "string", "enum": ["ADD_TRANSACTION", "CHECK_BALANCE", "UNKNOWN"]},
+        "intent": {"type": "string", "enum": ["ADD_TRANSACTION", "CHECK_BALANCE", "CHECK_STOCK", "UNKNOWN"]},
         "customer_name": {"type": "string"},
         "amount": {"type": "number"},
         "transaction_type": {"type": "string", "enum": ["CREDIT", "PAYMENT"]},
-        "item_description": {"type": "string"},
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "product_name": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string"},
+                },
+            },
+        },
     },
     "required": ["intent"],
 }
@@ -57,6 +67,35 @@ _CREDIT_HINTS = [
     "liya",
     "credit",
 ]
+
+_ITEM_HINTS = [
+    "kg",
+    "kilo",
+    "g",
+    "gm",
+    "gram",
+    "litre",
+    "liter",
+    "ltr",
+    "ml",
+    "pcs",
+    "piece",
+    "pieces",
+    "packet",
+    "pack",
+    "bottle",
+    "dozen",
+    "box",
+]
+
+
+def _looks_like_inventory(text: str) -> bool:
+    t = " ".join((text or "").strip().lower().split())
+    if not t:
+        return False
+    has_number = re.search(r"\d+(?:\.\d+)?", t) is not None
+    has_item_word = any(w in t for w in _ITEM_HINTS)
+    return has_number and has_item_word
 
 
 def _heuristic_text_parse(text: str) -> dict[str, Any]:
@@ -97,7 +136,7 @@ def _heuristic_text_parse(text: str) -> dict[str, Any]:
         "customer_name": name.title() if name else "",
         "amount": amount,
         "transaction_type": tx_type,
-        "item_description": "Text entry",
+        "items": [],
     }
 
 
@@ -119,6 +158,50 @@ def _safe_json_parse(raw: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+async def parse_bill_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict[str, Any]:
+    """Extract inventory items from a bill image using Gemini Vision."""
+
+    if not image_bytes:
+        return {"intent": "UNKNOWN"}
+
+    prompt = (
+        "Analyze this shop bill image (handwritten or printed). "
+        "Extract a list of products added to inventory. "
+        "For each item, identify product_name, quantity, unit, and cost_price (per-unit if available). "
+        "Return ONLY JSON with intent RESTOCK."
+    )
+
+    client = _get_client()
+    try:
+        resp = client.models.generate_content(
+            model=settings.gemini_intent_model,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+            ),
+        )
+        data = _safe_json_parse(resp.text or "")
+        if data:
+            if data.get("items") is None:
+                data["items"] = []
+            if not data.get("intent"):
+                data["intent"] = "RESTOCK"
+            return data
+    except Exception:
+        logger.exception("Gemini bill image parsing failed")
+
+    return {"intent": "UNKNOWN"}
+
+
 async def parse_text_message(text: str) -> dict[str, Any]:
     """Parse a plain text message into a transaction intent.
 
@@ -129,13 +212,15 @@ async def parse_text_message(text: str) -> dict[str, Any]:
         return {"intent": "UNKNOWN"}
 
     heuristic = _heuristic_text_parse(text)
-    if heuristic.get("intent") in {"ADD_TRANSACTION", "CHECK_BALANCE"}:
+    if heuristic.get("intent") in {"ADD_TRANSACTION", "CHECK_BALANCE"} and not _looks_like_inventory(text):
         return heuristic
 
     prompt = (
-        "Analyze this shopkeeper's message and extract transaction details. "
+        "You are an intelligent shop assistant. Analyze the shopkeeper's message and extract transaction details. "
         "Rules: 'udhar', 'baaki', 'le gaya' => CREDIT. "
         "'jama', 'de gaya', 'received' => PAYMENT. "
+        "If the user asks specifically about stock (e.g., 'chawal kitna hai'), intent is CHECK_STOCK. "
+        "If amount is not mentioned, set amount to 0. "
         "Return ONLY JSON matching the schema.\n\n"
         f"Message: {text}"
     )
@@ -152,6 +237,10 @@ async def parse_text_message(text: str) -> dict[str, Any]:
         )
         data = _safe_json_parse(resp.text or "")
         if data:
+            if data.get("amount") is None:
+                data["amount"] = 0
+            if data.get("items") is None:
+                data["items"] = []
             return data
     except Exception:
         logger.exception("Gemini text parsing failed")

@@ -1,203 +1,130 @@
-"use client";
-
-import { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/utils/supabase";
-
-type LedgerRow = {
-  id: number;
-  amount: number;
-  created_at: string;
-  reversed: boolean | null;
-  raw_text: string | null;
-  transcript: string | null;
-  customers: { name: string }[] | null;
-};
-
-const formatAmount = (value: number) => {
-  const sign = value < 0 ? "-" : "";
-  return `${sign}Rs ${Math.abs(value).toFixed(0)}`;
-};
-
 export default function Home() {
-  const [rows, setRows] = useState<LedgerRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-
-    const fetchLedger = async () => {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from("udhaar_entries")
-        .select("id, amount, created_at, reversed, raw_text, transcript, customers(name)")
-        .order("created_at", { ascending: false });
-
-      if (!active) {
-        return;
-      }
-
-      if (error) {
-        setError(error.message);
-      } else {
-        setRows((data || []) as LedgerRow[]);
-      }
-      setLoading(false);
-    };
-
-    fetchLedger();
-    const interval = setInterval(fetchLedger, 5000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, []);
-
-  const stats = useMemo(() => {
-    const totalUdhar = rows.reduce((sum, row) => sum + (row.amount || 0), 0);
-    const todayKey = new Date().toISOString().slice(0, 10);
-    const todaysSales = rows
-      .filter((row) => row.amount > 0 && row.created_at.startsWith(todayKey))
-      .reduce((sum, row) => sum + row.amount, 0);
-    const activeCustomers = new Set(
-      rows
-        .map((row) => (row.customers?.[0]?.name || "").trim())
-        .filter(Boolean),
-    ).size;
-    return { totalUdhar, todaysSales, activeCustomers };
-  }, [rows]);
-
   return (
-    <div className="min-h-screen overflow-hidden bg-[color:var(--background)] text-[color:var(--foreground)]">
-      <div className="pointer-events-none absolute inset-0">
-        <div className="grain absolute inset-0 opacity-80" />
-        <div className="absolute -top-40 -right-24 h-96 w-96 rounded-full bg-emerald-200/60 blur-3xl floaty" />
-        <div className="absolute top-44 -left-32 h-72 w-72 rounded-full bg-amber-200/70 blur-3xl floaty" />
-      </div>
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <header className="sticky top-0 z-40 border-b border-white/10 bg-slate-950/80 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+          <div className="text-lg font-bold tracking-tight">VoiceKhata</div>
+          <nav className="hidden gap-6 text-sm text-slate-300 md:flex">
+            <a href="#problem" className="hover:text-white">Problem</a>
+            <a href="#solution" className="hover:text-white">Solution</a>
+            <a href="#use-cases" className="hover:text-white">Use Cases</a>
+            <a href="#demo" className="hover:text-white">Demo</a>
+            <a href="#stack" className="hover:text-white">Stack</a>
+          </nav>
+          <a href="#demo" className="rounded-xl border border-cyan-300/40 bg-cyan-300/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-300/20">See demo</a>
+        </div>
+      </header>
 
-      <main className="relative mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-14 sm:px-10">
-        <section className="rise flex flex-col gap-5 rounded-3xl border border-emerald-900/10 bg-[color:var(--surface)] p-8 shadow-[0_20px_60px_-40px_rgba(16,55,45,0.6)]">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.2em] text-[color:var(--muted)]">
-                Voice Khata Admin
-              </p>
-              <h1 className="mt-3 text-3xl font-semibold tracking-tight text-[color:var(--foreground)] sm:text-4xl">
-                Business-level dashboard
-              </h1>
-              <p className="mt-2 max-w-2xl text-base text-[color:var(--muted)]">
-                Monitor udhaar exposure, daily credit sales, and active customers without touching the database.
-              </p>
-            </div>
-            <div className="flex items-center gap-3 rounded-full border border-emerald-900/10 bg-emerald-900/5 px-4 py-2 text-sm font-medium text-emerald-900">
-              <span className="inline-flex h-2 w-2 rounded-full bg-emerald-600" />
-              Live sync enabled
-            </div>
+      <main>
+        <section className="relative overflow-hidden">
+          <div className="pointer-events-none absolute inset-0">
+            <div className="absolute -top-36 -left-20 h-80 w-80 rounded-full bg-cyan-400/20 blur-3xl" />
+            <div className="absolute -top-28 right-0 h-80 w-80 rounded-full bg-violet-400/20 blur-3xl" />
           </div>
+          <div className="mx-auto grid max-w-6xl gap-10 px-6 py-16 md:grid-cols-2 md:py-24">
+            <div className="relative z-10">
+              <p className="inline-flex rounded-full border border-white/20 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-300">Hackathon-ready demo</p>
+              <h1 className="mt-4 text-4xl font-bold leading-tight tracking-tight md:text-5xl">Track udhaar with voice notes on WhatsApp.</h1>
+              <p className="mt-4 max-w-xl text-slate-300">VoiceKhata converts everyday messages into a clean ledger with confirmation-first safety, live summaries, inventory restock, and secure customer bill links.</p>
+              <ul className="mt-5 space-y-2 text-sm text-slate-200">
+                <li>• Works with normal WhatsApp messages</li>
+                <li>• YES/NO confirmation before save</li>
+                <li>• Snap-to-Inventory from bill images</li>
+              </ul>
+              <div className="mt-6 flex flex-wrap gap-3">
+                <a href="#demo" className="rounded-xl bg-cyan-400 px-5 py-3 text-sm font-bold text-slate-900 hover:bg-cyan-300">Try demo flow</a>
+                <a href="http://localhost:8000/docs" target="_blank" rel="noreferrer" className="rounded-xl border border-white/20 px-5 py-3 text-sm font-semibold hover:bg-white/10">Open API docs</a>
+              </div>
+            </div>
 
-          <div className="grid gap-4 sm:grid-cols-3">
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-4 shadow-sm">
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-rose-700/80">
-                Total udhar
-              </p>
-              <p className="mt-3 text-3xl font-semibold text-rose-700">
-                {formatAmount(stats.totalUdhar)}
-              </p>
-              <p className="mt-2 text-xs text-rose-700/70">Market mein fasa hua paisa</p>
-            </div>
-            <div className="rounded-2xl border border-sky-200 bg-sky-50 px-5 py-4 shadow-sm">
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-sky-700/80">
-                Today's sales
-              </p>
-              <p className="mt-3 text-3xl font-semibold text-sky-700">
-                {formatAmount(stats.todaysSales)}
-              </p>
-              <p className="mt-2 text-xs text-sky-700/70">Aaj ka credit dhandha</p>
-            </div>
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 shadow-sm">
-              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-amber-700/80">
-                Active customers
-              </p>
-              <p className="mt-3 text-3xl font-semibold text-amber-700">
-                {stats.activeCustomers}
-              </p>
-              <p className="mt-2 text-xs text-amber-700/70">Ledger me total log</p>
+            <div className="relative z-10 rounded-2xl border border-white/15 bg-white/5 p-5 shadow-2xl">
+              <div className="space-y-3 text-sm">
+                <div className="rounded-xl bg-white/10 p-3">Bhai, Ramesh ko 200 udhaar</div>
+                <div className="rounded-xl bg-cyan-300/20 p-3">Confirm: Add ₹200 udhaar for Ramesh? Reply YES or NO.</div>
+                <div className="rounded-xl bg-white/10 p-3">YES ✅</div>
+                <div className="rounded-xl bg-cyan-300/20 p-3">Done. Added ₹200 udhaar for Ramesh.</div>
+                <div className="rounded-xl bg-white/10 p-3">Ramesh ka total?</div>
+                <div className="rounded-xl bg-cyan-300/20 p-3">Ramesh total: Net ₹200</div>
+              </div>
             </div>
           </div>
         </section>
 
-        <section className="rise rounded-3xl border border-emerald-900/10 bg-[color:var(--surface)] p-6 shadow-[0_18px_50px_-40px_rgba(16,55,45,0.5)]">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-emerald-900/10 pb-4">
-            <div>
-              <h2 className="text-xl font-semibold text-[color:var(--foreground)]">Recent activity</h2>
-              <p className="text-sm text-[color:var(--muted)]">Newest updates from the WhatsApp webhook.</p>
-            </div>
-            {loading && <span className="text-sm text-[color:var(--muted)]">Loading ledger...</span>}
-            {error && <span className="text-sm text-red-600">{error}</span>}
+        <section className="border-y border-white/10 bg-white/5">
+          <div className="mx-auto grid max-w-6xl gap-3 px-6 py-6 md:grid-cols-4">
+            <div className="rounded-xl border border-white/10 bg-white/5 p-3"><strong>Voice + Text</strong><div className="text-xs text-slate-300">Input supported end-to-end</div></div>
+            <div className="rounded-xl border border-white/10 bg-white/5 p-3"><strong>Confirmation-first</strong><div className="text-xs text-slate-300">Prevents wrong entries</div></div>
+            <div className="rounded-xl border border-white/10 bg-white/5 p-3"><strong>Live dashboard</strong><div className="text-xs text-slate-300">Realtime ledger visibility</div></div>
+            <div className="rounded-xl border border-white/10 bg-white/5 p-3"><strong>Secure bill links</strong><div className="text-xs text-slate-300">Shareable customer pay page</div></div>
           </div>
+        </section>
 
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[680px] border-collapse text-left">
-              <thead>
-                <tr className="text-xs uppercase tracking-[0.2em] text-[color:var(--muted)]">
-                  <th className="py-3">Date</th>
-                  <th className="py-3">Customer</th>
-                  <th className="py-3">Note</th>
-                  <th className="py-3 text-right">Amount</th>
-                  <th className="py-3 text-right">Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => {
-                  const type = row.amount < 0 ? "PAYMENT" : "CREDIT";
-                  const note = row.raw_text || row.transcript || "Text entry";
-                  return (
-                    <tr
-                      key={row.id}
-                      className="border-t border-emerald-900/10 text-sm text-[color:var(--foreground)]"
-                    >
-                      <td className="py-4 text-[color:var(--muted)]">
-                        {new Date(row.created_at).toLocaleString()}
-                      </td>
-                      <td className="py-4 font-semibold">
-                        {row.customers?.[0]?.name || "Unknown"}
-                      </td>
-                      <td className="py-4 text-[color:var(--muted)]">
-                        {note}
-                        {row.reversed ? (
-                          <span className="ml-2 inline-flex rounded-full border border-amber-400/40 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-700">
-                            reversed
-                          </span>
-                        ) : null}
-                      </td>
-                      <td className="py-4 text-right font-semibold">
-                        {formatAmount(row.amount)}
-                      </td>
-                      <td className="py-4 text-right">
-                        <span
-                          className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${
-                            type === "CREDIT"
-                              ? "bg-rose-100 text-rose-700"
-                              : "bg-emerald-100 text-emerald-700"
-                          }`}
-                        >
-                          {type}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        <section id="problem" className="mx-auto max-w-6xl px-6 py-14">
+          <h2 className="text-3xl font-bold tracking-tight">Problem</h2>
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Udhaar is informal</h3><p className="mt-2 text-sm text-slate-300">Notebooks and memory cause confusion and disputes.</p></article>
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Typing is slow</h3><p className="mt-2 text-sm text-slate-300">Rush hours need voice-speed entry, not forms.</p></article>
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Errors are costly</h3><p className="mt-2 text-sm text-slate-300">Wrong name/amount directly hurts trust and cashflow.</p></article>
           </div>
+        </section>
 
-          {!loading && rows.length === 0 && !error && (
-            <div className="py-10 text-center text-sm text-[color:var(--muted)]">
-              No entries yet. Send a WhatsApp message to create the first one.
+        <section id="solution" className="border-y border-white/10 bg-white/5">
+          <div className="mx-auto max-w-6xl px-6 py-14">
+            <h2 className="text-3xl font-bold tracking-tight">Solution</h2>
+            <p className="mt-2 text-slate-300">A WhatsApp-first voice khata with AI extraction and explicit confirmation before save.</p>
+            <div className="mt-6 grid gap-4">
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4"><strong>1. Send voice/text</strong><p className="mt-1 text-sm text-slate-300">Example: “Sita ko 150 udhaar add karo”.</p></div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4"><strong>2. AI extracts intent</strong><p className="mt-1 text-sm text-slate-300">Customer + amount + action + items when needed.</p></div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4"><strong>3. Confirm to save</strong><p className="mt-1 text-sm text-slate-300">Reply YES/NO to keep ledger safe by default.</p></div>
             </div>
-          )}
+          </div>
+        </section>
+
+        <section id="use-cases" className="mx-auto max-w-6xl px-6 py-14">
+          <h2 className="text-3xl font-bold tracking-tight">Use Cases</h2>
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Fast udhaar entry</h3><p className="mt-2 text-sm text-slate-300">Log dues in seconds from a message.</p></article>
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Snap-to-Inventory</h3><p className="mt-2 text-sm text-slate-300">Scan purchase bill and restock with audit logs.</p></article>
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Secure customer payment</h3><p className="mt-2 text-sm text-slate-300">Share link-based bill page with UPI pay CTA.</p></article>
+          </div>
+        </section>
+
+        <section id="demo" className="border-y border-white/10 bg-white/5">
+          <div className="mx-auto max-w-6xl px-6 py-14">
+            <h2 className="text-3xl font-bold tracking-tight">Live Demo (for judges)</h2>
+            <p className="mt-2 text-slate-300">Use backend demo endpoints and dashboard routes for quick walkthrough.</p>
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              <a href="http://localhost:8000/demo/record" target="_blank" rel="noreferrer" className="rounded-2xl border border-white/10 bg-white/5 p-5 hover:bg-white/10">
+                <h3 className="font-semibold">Open Voice Demo Recorder</h3>
+                <p className="mt-1 text-sm text-slate-300">Test voice pipeline without WhatsApp setup.</p>
+              </a>
+              <a href="/dashboard/%2B919999999999" className="rounded-2xl border border-white/10 bg-white/5 p-5 hover:bg-white/10">
+                <h3 className="font-semibold">Open Live Dashboard</h3>
+                <p className="mt-1 text-sm text-slate-300">See realtime udhaar entries and stats.</p>
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <section id="stack" className="mx-auto max-w-6xl px-6 py-14">
+          <h2 className="text-3xl font-bold tracking-tight">Tech Stack</h2>
+          <div className="mt-6 grid gap-4 md:grid-cols-3">
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">FastAPI</h3><p className="mt-2 text-sm text-slate-300">Webhook and demo API layer.</p></article>
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Supabase</h3><p className="mt-2 text-sm text-slate-300">Ledger + inventory + audit logs.</p></article>
+            <article className="rounded-2xl border border-white/10 bg-white/5 p-5"><h3 className="font-semibold">Gemini</h3><p className="mt-2 text-sm text-slate-300">Transcription and intent extraction.</p></article>
+          </div>
         </section>
       </main>
+
+      <footer className="border-t border-white/10 bg-black/20">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-6 text-sm text-slate-300">
+          <span>© {new Date().getFullYear()} VoiceKhata</span>
+          <div className="flex gap-4">
+            <a href="http://localhost:8000/health" target="_blank" rel="noreferrer" className="hover:text-white">API health</a>
+            <a href="http://localhost:8000/docs" target="_blank" rel="noreferrer" className="hover:text-white">API docs</a>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
